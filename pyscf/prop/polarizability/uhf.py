@@ -21,327 +21,595 @@ Non-relativistic static and dynamic polarizability and hyper-polarizability tens
 (In testing)
 '''
 
-
-
-from functools import reduce
-import warnings
 import numpy
 from pyscf import lib
 from pyscf.lib import logger
-from pyscf.scf import ucphf
-from pyscf.scf import _response_functions  # noqa
-
-warnings.warn('Module polarizability is under testing')
+from pyscf.scf import hf, uhf, _response_functions
+from . import rhf
 
 
-def dipole(mf):
-    return mf.dip_moment(mf.mol, mf.make_rdm1())
+def get_dm1(polobj, mo1, freq=0):
+    '''
+    Generate the 1st-order density matrix in AO basis.
+    '''
+    mf = polobj.mf
+    mo_coeff = mf.mo_coeff
+    occidxa = mf.mo_occ[0] > 0
+    occidxb = mf.mo_occ[1] > 0
+    orbva = mo_coeff[0][:,~occidxa]
+    orboa = mo_coeff[0][:, occidxa]
+    orbvb = mo_coeff[1][:,~occidxb]
+    orbob = mo_coeff[1][:, occidxb]
+    if freq == 0 and len(mo1) != 4:
+        dm1a = lib.einsum('pj,xji,qi->xpq', orbva, mo1[0], orboa.conj())
+        dm1a+= dm1a.transpose(0,2,1).conj()
+        dm1b = lib.einsum('pj,xji,qi->xpq', orbvb, mo1[1], orbob.conj())
+        dm1b+= dm1b.transpose(0,2,1).conj()
+    else:
+        dm1a = lib.einsum('pj,xji,qi->xpq', orbva, mo1[0]       , orboa.conj())
+        dm1a+= lib.einsum('pi,xji,qj->xpq', orboa, mo1[1].conj(), orbva.conj())
+        dm1b = lib.einsum('pj,xji,qi->xpq', orbvb, mo1[2]       , orbob.conj())
+        dm1b+= lib.einsum('pi,xji,qj->xpq', orbob, mo1[3].conj(), orbvb.conj())
+    return (dm1a, dm1b)
 
+def get_e_vo(mf):
+    '''
+    Generate $e_vo = e_v - e_o$.
+    '''
+    occidxa = mf.mo_occ[0] > 0
+    occidxb = mf.mo_occ[1] > 0
+    mo_ea, mo_eb = mf.mo_energy
+    ea_v = mo_ea[~occidxa]
+    ea_o = mo_ea[ occidxa]
+    ea_vo = ea_v[:,None] - ea_o
+    eb_v = mo_eb[~occidxb]
+    eb_o = mo_eb[ occidxb]
+    eb_vo = eb_v[:,None] - eb_o
+    return (ea_vo, eb_vo)
+
+def _to_vo(mf, ao):
+    '''
+    Convert some quantity in AO basis to that in vir-occ MO basis.
+    '''
+    mo_coeff = mf.mo_coeff
+    occidxa = mf.mo_occ[0] > 0
+    occidxb = mf.mo_occ[1] > 0
+    orbva = mo_coeff[0][:,~occidxa]
+    orboa = mo_coeff[0][:, occidxa]
+    orbvb = mo_coeff[1][:,~occidxb]
+    orbob = mo_coeff[1][:, occidxb]
+    if len(ao) == 3:
+        voa = lib.einsum('pj,xpq,qi->xji', orbva.conj(), ao, orboa)
+        vob = lib.einsum('pj,xpq,qi->xji', orbvb.conj(), ao, orbob)
+    elif len(ao) == 2:
+        voa = lib.einsum('pj,xpq,qi->xji', orbva.conj(), ao[0], orboa)
+        vob = lib.einsum('pj,xpq,qi->xji', orbvb.conj(), ao[1], orbob)
+    return (voa, vob)
+
+def _to_vv(mf, ao):
+    '''
+    Convert some quantity in AO basis to that in vir-occ MO basis.
+    '''
+    mo_coeff = mf.mo_coeff
+    viridxa = mf.mo_occ[0] == 0
+    viridxb = mf.mo_occ[1] == 0
+    orbva = mo_coeff[0][:, viridxa]
+    orbvb = mo_coeff[1][:, viridxb]
+    if len(ao) == 3:
+        vva = lib.einsum('pj,xpq,qi->xji', orbva.conj(), ao, orbva)
+        vvb = lib.einsum('pj,xpq,qi->xji', orbvb.conj(), ao, orbvb)
+    elif len(ao) == 2:
+        vva = lib.einsum('pj,xpq,qi->xji', orbva.conj(), ao[0], orbva)
+        vvb = lib.einsum('pj,xpq,qi->xji', orbvb.conj(), ao[1], orbvb)
+    return (vva, vvb)
+
+def _to_oo(mf, ao):
+    '''
+    Convert some quantity in AO basis to that in vir-occ MO basis.
+    '''
+    mo_coeff = mf.mo_coeff
+    occidxa = mf.mo_occ[0] > 0
+    occidxb = mf.mo_occ[1] > 0
+    orboa = mo_coeff[0][:, occidxa]
+    orbob = mo_coeff[1][:, occidxb]
+    if len(ao) == 3:
+        ooa = lib.einsum('pj,xpq,qi->xji', orboa.conj(), ao, orboa)
+        oob = lib.einsum('pj,xpq,qi->xji', orbob.conj(), ao, orbob)
+    elif len(ao) == 2:
+        ooa = lib.einsum('pj,xpq,qi->xji', orboa.conj(), ao[0], orboa)
+        oob = lib.einsum('pj,xpq,qi->xji', orbob.conj(), ao[1], orbob)
+    return (ooa, oob)
 
 # Note: polarizability and relevant properties are demanding on basis sets.
 # ORCA recommends to use Sadlej basis for these properties.
-def polarizability(polobj, with_cphf=True):
-    from pyscf.prop.nmr import uhf as uhf_nmr
+def polarizability(polobj, freq=0, picture_change=True, solver='krylov'):
+    '''
+    Polarizability (with picture change correction if in SFX2C).
+    '''
     log = logger.new_logger(polobj)
-    mf = polobj._scf
-    mol = mf.mol
-    mo_energy = mf.mo_energy
-    mo_coeff = mf.mo_coeff
-    mo_occ = mf.mo_occ
-    occidxa = mo_occ[0] > 0
-    occidxb = mo_occ[1] > 0
-    mo0a, mo0b = mo_coeff
-    orboa = mo0a[:, occidxa]
-    orbob = mo0b[:, occidxb]
-    #orbva = mo0a[:,~occidxa]
-    #orbvb = mo0b[:,~occidxb]
+    mf = polobj.mf
+    h1 = polobj.get_h1vo(picture_change)
+    mo1 = polobj.get_mo1(freq, picture_change, solver)
 
-    charges = mol.atom_charges()
-    coords  = mol.atom_coords()
-    charge_center = numpy.einsum('i,ix->x', charges, coords) / charges.sum()
-    with mol.with_common_orig(charge_center):
-        int_r = mol.intor_symmetric('int1e_r', comp=3)
-
-    h1a = lib.einsum('xpq,pi,qj->xij', int_r, mo0a.conj(), orboa)
-    h1b = lib.einsum('xpq,pi,qj->xij', int_r, mo0b.conj(), orbob)
-    s1a = numpy.zeros_like(h1a)
-    s1b = numpy.zeros_like(h1b)
-    vind = polobj.gen_vind(mf, mo_coeff, mo_occ)
-    if with_cphf:
-        mo1 = ucphf.solve(vind, mo_energy, mo_occ, (h1a,h1b), (s1a,s1b),
-                          polobj.max_cycle_cphf, polobj.conv_tol,
-                          verbose=log)[0]
+    if freq == 0:
+        # alpha(0;0)
+        alpha  = -lib.einsum('xji,yji->xy', h1[0].conj(), mo1[0])
+        alpha += -lib.einsum('xji,yji->xy', h1[1].conj(), mo1[1])
+        alpha += alpha.conj()
+    
     else:
-        mo1 = uhf_nmr._solve_mo1_uncoupled(mo_energy, mo_occ, (h1a,h1b),
-                                           (s1a,s1b))[0]
-
-    e2 = numpy.einsum('xpi,ypi->xy', h1a, mo1[0])
-    e2+= numpy.einsum('xpi,ypi->xy', h1b, mo1[1])
-    e2 = -(e2 + e2.T)
+        # alpha(-omega;omega)
+        alpha  = -lib.einsum('xji,yji->xy', h1[0].conj(), mo1[0])
+        alpha += -lib.einsum('xji,yji->xy', h1[0], mo1[1].conj())
+        alpha += -lib.einsum('xji,yji->xy', h1[1].conj(), mo1[2])
+        alpha += -lib.einsum('xji,yji->xy', h1[1], mo1[3].conj())
 
     if mf.verbose >= logger.INFO:
-        xx, yy, zz = e2.diagonal()
+        xx, yy, zz = alpha.diagonal()
         log.note('Isotropic polarizability %.12g', (xx+yy+zz)/3)
         log.note('Polarizability anisotropy %.12g',
                  (.5 * ((xx-yy)**2 + (yy-zz)**2 + (zz-xx)**2))**.5)
-        log.debug('Static polarizability tensor\n%s', e2)
-    return e2
+        log.debug(f'Polarizability tensor alpha({-freq};{freq})')
+        log.debug(f'{alpha}')
 
+    return alpha
 
-def hyper_polarizability(polobj, with_cphf=True):
-    from pyscf.prop.nmr import uhf as uhf_nmr
+def hyperpolarizability(polobj, freq=0, type='SHG', picture_change=True, solver='krylov'):
+    '''
+    Hyperpolarizability (with picture change correction if in SFX2C).
+    '''
     log = logger.new_logger(polobj)
-    mf = polobj._scf
-    mol = mf.mol
-    mo_energy = mf.mo_energy
-    mo_coeff = mf.mo_coeff
-    mo_occ = mf.mo_occ
-    occidxa = mo_occ[0] > 0
-    occidxb = mo_occ[1] > 0
-    mo0a, mo0b = mo_coeff
-    orboa = mo0a[:, occidxa]
-    orbob = mo0b[:, occidxb]
-    #orbva = mo0a[:,~occidxa]
-    #orbvb = mo0b[:,~occidxb]
+    mf = polobj.mf
 
-    charges = mol.atom_charges()
-    coords  = mol.atom_coords()
-    charge_center = numpy.einsum('i,ix->x', charges, coords) / charges.sum()
-    with mol.with_common_orig(charge_center):
-        int_r = mol.intor_symmetric('int1e_r', comp=3)
+    if freq == 0:
+        mo1 = polobj.get_mo1(freq, picture_change, solver)
+        f1 = polobj.get_f1vv(mo1, freq, picture_change)
+        e1 = polobj.get_e1(mo1, freq, picture_change)
 
-    h1a = lib.einsum('xpq,pi,qj->xij', int_r, mo0a.conj(), orboa)
-    h1b = lib.einsum('xpq,pi,qj->xij', int_r, mo0b.conj(), orbob)
-    s1a = numpy.zeros_like(h1a)
-    s1b = numpy.zeros_like(h1b)
-    vind = polobj.gen_vind(mf, mo_coeff, mo_occ)
-    if with_cphf:
-        mo1, e1 = ucphf.solve(vind, mo_energy, mo_occ, (h1a,h1b), (s1a,s1b),
-                              polobj.max_cycle_cphf, polobj.conv_tol, verbose=log)
+        # beta(0;0,0)
+        beta = -lib.einsum('xjl,yji,zli->xyz', f1[0], mo1[0].conj(), mo1[0])
+        beta +=-lib.einsum('xjl,yji,zli->xyz', f1[1], mo1[1].conj(), mo1[1])
+        beta += lib.einsum('xik,yjk,zji->xyz', e1[0], mo1[0].conj(), mo1[0])
+        beta += lib.einsum('xik,yjk,zji->xyz', e1[1], mo1[1].conj(), mo1[1])
+        beta += beta.transpose(0,2,1) + beta.transpose(1,0,2) + \
+                beta.transpose(1,2,0) + beta.transpose(2,0,1) + beta.transpose(2,1,0)
+        
+        if isinstance(mf, hf.KohnShamDFT):
+            ni = mf._numint
+            ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
+            xctype = ni._xc_type(mf.xc)
+            dm = mf.make_rdm1()
+            dm1 = polobj.get_dm1(mo1, freq)
+
+            if xctype == 'LDA':
+                ao = ni.eval_ao(mf.mol, mf.grids.coords)
+                rho = numpy.stack([ni.eval_rho(mf.mol, ao, dms, xctype=xctype) for dms in dm])
+                rho1a = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                     for dmx in dm1[0]])
+                rho1b = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                     for dmx in dm1[1]])
+                rho1 = numpy.stack((rho1a, rho1b), axis=1).reshape(3,2,1,-1) # reshape to match kxc
+                
+            elif xctype == 'GGA' or 'MGGA':
+                ao = ni.eval_ao(mf.mol, mf.grids.coords, deriv=1)
+                rho = numpy.stack([ni.eval_rho(mf.mol, ao, dms, xctype=xctype) for dms in dm])
+                rho1a = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                 with_lapl=False) for dmx in dm1[0]])
+                rho1b = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                 with_lapl=False) for dmx in dm1[1]])
+                rho1 = numpy.stack((rho1a, rho1b), axis=1)
+
+            else:
+                raise RuntimeError(f"Unknown xctype '{xctype}'")
+            
+            kxc = ni.eval_xc_eff(mf.xc, rho, deriv=3)[3] * mf.grids.weights
+            beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz', rho1, rho1, rho1, kxc)
+        
+        if mf.verbose >= logger.INFO:
+            log.debug(f'Static hyperpolarizability tensor beta({freq};{freq},{freq})')
+            log.debug(f'{beta}')
+    
+    elif type.upper() == 'SHG':
+        mo1_2o = polobj.get_mo1(freq*2, picture_change, solver)
+        f1_p2o = polobj.get_f1vv(mo1_2o, freq*2, picture_change)
+        f1_m2o = (f1_p2o[0].transpose(0,2,1).conj(),
+                  f1_p2o[1].transpose(0,2,1).conj())
+        e1_p2o = polobj.get_e1(mo1_2o, freq*2, picture_change)
+        e1_m2o = (e1_p2o[0].transpose(0,2,1).conj(),
+                  e1_p2o[1].transpose(0,2,1).conj())
+        
+        mo1_1o = polobj.get_mo1(freq, picture_change, solver)
+        f1_p1o = polobj.get_f1vv(mo1_1o, freq, picture_change)
+        e1_p1o = polobj.get_e1(mo1_1o, freq, picture_change)
+        
+        # beta(-2omega;omega,omega)
+        beta = -lib.einsum('xjl,yji,zli->xyz', f1_m2o[0], mo1_1o[1].conj(), mo1_1o[0])
+        beta +=-lib.einsum('xjl,yji,zli->xyz', f1_m2o[1], mo1_1o[3].conj(), mo1_1o[2])
+        beta +=-lib.einsum('yjl,xji,zli->xyz', f1_p1o[0], mo1_2o[0].conj(), mo1_1o[0])
+        beta +=-lib.einsum('yjl,xji,zli->xyz', f1_p1o[1], mo1_2o[2].conj(), mo1_1o[2])
+        beta +=-lib.einsum('zjl,yji,xli->xyz', f1_p1o[0], mo1_1o[1].conj(), mo1_2o[1])
+        beta +=-lib.einsum('zjl,yji,xli->xyz', f1_p1o[1], mo1_1o[3].conj(), mo1_2o[3])
+        beta += lib.einsum('xji,yki,zkj->xyz', e1_m2o[0], mo1_1o[1].conj(), mo1_1o[0])
+        beta += lib.einsum('xji,yki,zkj->xyz', e1_m2o[1], mo1_1o[3].conj(), mo1_1o[2])
+        beta += lib.einsum('yji,xki,zkj->xyz', e1_p1o[0], mo1_2o[0].conj(), mo1_1o[0])
+        beta += lib.einsum('yji,xki,zkj->xyz', e1_p1o[1], mo1_2o[2].conj(), mo1_1o[2])
+        beta += lib.einsum('zji,yki,xkj->xyz', e1_p1o[0], mo1_1o[1].conj(), mo1_2o[1])
+        beta += lib.einsum('zji,yki,xkj->xyz', e1_p1o[1], mo1_1o[3].conj(), mo1_2o[3])
+        beta += beta.transpose(0,2,1)
+        
+        if isinstance(mf, hf.KohnShamDFT):
+            ni = mf._numint
+            ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
+            xctype = ni._xc_type(mf.xc)
+            dm = mf.make_rdm1()
+            dm1_p2o = polobj.get_dm1(mo1_2o, freq*2)
+            dm1_m2o = (dm1_p2o[0].transpose(0,2,1).conj(),
+                       dm1_p2o[1].transpose(0,2,1).conj())
+            dm1_p1o = polobj.get_dm1(mo1_1o, freq)
+
+            if xctype == 'LDA':
+                ao = ni.eval_ao(mf.mol, mf.grids.coords)
+                rho = numpy.stack([ni.eval_rho(mf.mol, ao, dms, xctype=xctype) for dms in dm])
+                rho1a_m2o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                         for dmx in dm1_m2o[0]])
+                rho1b_m2o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                         for dmx in dm1_m2o[1]])
+                rho1a_p1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                         for dmx in dm1_p1o[0]])
+                rho1b_p1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                         for dmx in dm1_p1o[1]])
+                rho1_m2o = numpy.stack((rho1a_m2o, rho1b_m2o), axis=1).reshape(3,2,1,-1) # reshape to match kxc
+                rho1_p1o = numpy.stack((rho1a_p1o, rho1b_p1o), axis=1).reshape(3,2,1,-1) # reshape to match kxc
+                
+            elif xctype == 'GGA' or 'MGGA':
+                ao = ni.eval_ao(mf.mol, mf.grids.coords, deriv=1)
+                rho = numpy.stack([ni.eval_rho(mf.mol, ao, dms, xctype=xctype) for dms in dm])
+                rho1a_m2o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                     with_lapl=False) for dmx in dm1_m2o[0]])
+                rho1b_m2o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                     with_lapl=False) for dmx in dm1_m2o[1]])
+                rho1a_p1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                     with_lapl=False) for dmx in dm1_p1o[0]])
+                rho1b_p1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                     with_lapl=False) for dmx in dm1_p1o[1]])
+                rho1_m2o = numpy.stack((rho1a_m2o, rho1b_m2o), axis=1)
+                rho1_p1o = numpy.stack((rho1a_p1o, rho1b_p1o), axis=1)
+                
+            else:
+                raise RuntimeError(f"Unknown xctype '{xctype}'")
+            
+            kxc = ni.eval_xc_eff(mf.xc, rho, deriv=3)[3] * mf.grids.weights
+            beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz', rho1_m2o, rho1_p1o, rho1_p1o, kxc)
+
+        if mf.verbose >= logger.INFO:
+            log.debug(f'{type} hyperpolarizability tensor beta({-2*freq};{freq},{freq})')
+            log.debug(f'{beta}')
+    
+    elif type.upper() == 'EOPE' or 'OR':
+        mo1_1o = polobj.get_mo1(freq, picture_change, solver)
+        f1_p1o = polobj.get_f1vv(mo1_1o, freq, picture_change)
+        f1_m1o = (f1_p1o[0].transpose(0,2,1).conj(),
+                  f1_p1o[1].transpose(0,2,1).conj())
+        e1_p1o = polobj.get_e1(mo1_1o, freq, picture_change)
+        e1_m1o = (e1_p1o[0].transpose(0,2,1).conj(),
+                  e1_p1o[1].transpose(0,2,1).conj())
+
+        mo1 = polobj.get_mo1(0, picture_change, solver)
+        f1 = polobj.get_f1vv(mo1, 0, picture_change)
+        e1 = polobj.get_e1(mo1, 0, picture_change)
+
+        # beta(-omega;omega,0)
+        beta = -lib.einsum('xjl,yji,zli->xyz', f1_m1o[0], mo1_1o[1].conj(), mo1[0])
+        beta +=-lib.einsum('xjl,yji,zli->xyz', f1_m1o[1], mo1_1o[3].conj(), mo1[1])
+        beta +=-lib.einsum('xjl,zji,yli->xyz', f1_m1o[0], mo1[0].conj(), mo1_1o[0])
+        beta +=-lib.einsum('xjl,zji,yli->xyz', f1_m1o[1], mo1[1].conj(), mo1_1o[2])
+        beta +=-lib.einsum('yjl,xji,zli->xyz', f1_p1o[0], mo1_1o[0].conj(), mo1[0])
+        beta +=-lib.einsum('yjl,xji,zli->xyz', f1_p1o[1], mo1_1o[2].conj(), mo1[1])
+        beta +=-lib.einsum('yjl,zji,xli->xyz', f1_p1o[0], mo1[0].conj(), mo1_1o[1])
+        beta +=-lib.einsum('yjl,zji,xli->xyz', f1_p1o[1], mo1[1].conj(), mo1_1o[3])
+        beta +=-lib.einsum('zjl,xji,yli->xyz', f1[0], mo1_1o[0].conj(), mo1_1o[0])
+        beta +=-lib.einsum('zjl,xji,yli->xyz', f1[1], mo1_1o[2].conj(), mo1_1o[2])
+        beta +=-lib.einsum('zjl,yji,xli->xyz', f1[0], mo1_1o[1].conj(), mo1_1o[1])
+        beta +=-lib.einsum('zjl,yji,xli->xyz', f1[1], mo1_1o[3].conj(), mo1_1o[3])
+        beta += lib.einsum('xji,yki,zkj->xyz', e1_m1o[0], mo1_1o[1].conj(), mo1[0])
+        beta += lib.einsum('xji,yki,zkj->xyz', e1_m1o[1], mo1_1o[3].conj(), mo1[1])
+        beta += lib.einsum('xji,zki,ykj->xyz', e1_m1o[0], mo1[0].conj(), mo1_1o[0])
+        beta += lib.einsum('xji,zki,ykj->xyz', e1_m1o[1], mo1[1].conj(), mo1_1o[2])
+        beta += lib.einsum('yji,xki,zkj->xyz', e1_p1o[0], mo1_1o[0].conj(), mo1[0])
+        beta += lib.einsum('yji,xki,zkj->xyz', e1_p1o[1], mo1_1o[2].conj(), mo1[1])
+        beta += lib.einsum('yji,zki,xkj->xyz', e1_p1o[0], mo1[0].conj(), mo1_1o[1])
+        beta += lib.einsum('yji,zki,xkj->xyz', e1_p1o[1], mo1[1].conj(), mo1_1o[3])
+        beta += lib.einsum('zji,xki,ykj->xyz', e1[0], mo1_1o[0].conj(), mo1_1o[0])
+        beta += lib.einsum('zji,xki,ykj->xyz', e1[1], mo1_1o[2].conj(), mo1_1o[2])
+        beta += lib.einsum('zji,yki,xkj->xyz', e1[0], mo1_1o[1].conj(), mo1_1o[1])
+        beta += lib.einsum('zji,yki,xkj->xyz', e1[1], mo1_1o[3].conj(), mo1_1o[3])
+        
+        if isinstance(mf, hf.KohnShamDFT):
+            ni = mf._numint
+            ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
+            xctype = ni._xc_type(mf.xc)
+            dm = mf.make_rdm1()
+            dm1 = polobj.get_dm1(mo1, 0)
+            dm1_p1o = polobj.get_dm1(mo1_1o, freq)
+            dm1_m1o = (dm1_p1o[0].transpose(0,2,1).conj(),
+                       dm1_p1o[1].transpose(0,2,1).conj())
+
+            if xctype == 'LDA':
+                ao = ni.eval_ao(mf.mol, mf.grids.coords)
+                rho = numpy.stack([ni.eval_rho(mf.mol, ao, dms, xctype=xctype) for dms in dm])
+                rho1a = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                     for dmx in dm1[0]])
+                rho1b = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                     for dmx in dm1[1]])
+                rho1a_m1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                         for dmx in dm1_m1o[0]])
+                rho1b_m1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                         for dmx in dm1_m1o[1]])
+                rho1a_p1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                         for dmx in dm1_p1o[0]])
+                rho1b_p1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                         for dmx in dm1_p1o[1]])
+                rho1 = numpy.stack((rho1a, rho1b), axis=1).reshape(3,2,1,-1) # reshape to match kxc
+                rho1_m1o = numpy.stack((rho1a_m1o, rho1b_m1o), axis=1).reshape(3,2,1,-1) # reshape to match kxc
+                rho1_p1o = numpy.stack((rho1a_p1o, rho1b_p1o), axis=1).reshape(3,2,1,-1) # reshape to match kxc
+                
+            elif xctype == 'GGA' or 'MGGA':
+                ao = ni.eval_ao(mf.mol, mf.grids.coords, deriv=1)
+                rho = numpy.stack([ni.eval_rho(mf.mol, ao, dms, xctype=xctype) for dms in dm])
+                rho1a = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                 with_lapl=False) for dmx in dm1[0]])
+                rho1b = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                 with_lapl=False) for dmx in dm1[1]])
+                rho1a_m1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                     with_lapl=False) for dmx in dm1_m1o[0]])
+                rho1b_m1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                     with_lapl=False) for dmx in dm1_m1o[1]])
+                rho1a_p1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                     with_lapl=False) for dmx in dm1_p1o[0]])
+                rho1b_p1o = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                                     with_lapl=False) for dmx in dm1_p1o[1]])
+                rho1 = numpy.stack((rho1a, rho1b), axis=1)
+                rho1_m1o = numpy.stack((rho1a_m1o, rho1b_m1o), axis=1)
+                rho1_p1o = numpy.stack((rho1a_p1o, rho1b_p1o), axis=1)
+                
+            else:
+                raise RuntimeError(f"Unknown xctype '{xctype}'")
+            
+            kxc = ni.eval_xc_eff(mf.xc, rho, deriv=3)[3] * mf.grids.weights
+            beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz', rho1_m1o, rho1_p1o, rho1, kxc)
+
+        if type.upper() == 'EOPE':
+            if mf.verbose >= logger.INFO:
+                log.debug(f'{type} hyperpolarizability tensor beta({-freq};{freq},0)')
+                log.debug(f'{beta}')
+        
+        if type.upper() == 'OR':
+            if mf.verbose >= logger.INFO:
+                log.debug(f'{type} hyperpolarizability tensor beta(0;{freq},{-freq})')
+                log.debug(f'{beta.transpose(2,1,0)}')
+                
+            beta = beta.transpose(2,1,0)
+
     else:
-        mo1, e1 = uhf_nmr._solve_mo1_uncoupled(mo_energy, mo_occ, (h1a,h1b),
-                                               (s1a,s1b))
-    mo1a = lib.einsum('xqi,pq->xpi', mo1[0], mo0a)
-    mo1b = lib.einsum('xqi,pq->xpi', mo1[1], mo0b)
-
-    dm1a = lib.einsum('xpi,qi->xpq', mo1a, orboa)
-    dm1b = lib.einsum('xpi,qi->xpq', mo1b, orbob)
-    dm1a = dm1a + dm1a.transpose(0,2,1)
-    dm1b = dm1b + dm1b.transpose(0,2,1)
-    vresp = mf.gen_response(hermi=1)
-    h1ao = int_r + vresp(numpy.stack((dm1a, dm1b)))
-    s0 = mf.get_ovlp()
-    e3  = lib.einsum('xpq,ypi,zqi->xyz', h1ao[0], mo1a, mo1a)
-    e3 += lib.einsum('xpq,ypi,zqi->xyz', h1ao[1], mo1b, mo1b)
-    e3 -= lib.einsum('pq,xpi,yqj,zij->xyz', s0, mo1a, mo1a, e1[0])
-    e3 -= lib.einsum('pq,xpi,yqj,zij->xyz', s0, mo1b, mo1b, e1[1])
-    e3 = (e3 + e3.transpose(1,2,0) + e3.transpose(2,0,1) +
-          e3.transpose(0,2,1) + e3.transpose(1,0,2) + e3.transpose(2,1,0))
-    e3 = -e3
-    log.debug('Static hyper polarizability tensor\n%s', e3)
-    return e3
-
+        raise NotImplementedError(f'{type}')
+    
+    return beta
 
 # Solve the frequency-dependent CPHF problem
 # [A-wI, B   ] [X] + [h1] = [0]
 # [B   , A+wI] [Y]   [h1]   [0]
-def ucphf_with_freq(mf, mo_energy, mo_occ, h1, freq=0,
-                    max_cycle=20, tol=1e-9, hermi=False, verbose=logger.WARN):
+def krylov_solver(polobj, freq=0, picture_change=True, verbose=logger.WARN):
+    '''
+    1st-order UCPHF/KS iterative solver by `pyscf.lib.krylov`.
+    '''
     log = logger.new_logger(verbose=verbose)
     t0 = (logger.process_clock(), logger.perf_counter())
 
-    occidxa = mo_occ[0] > 0
-    occidxb = mo_occ[1] > 0
-    viridxa = ~occidxa
-    viridxb = ~occidxb
-    mo_ea, mo_eb = mo_energy
-
-    # e_ai - freq may produce very small elements which can cause numerical
-    # issue in krylov solver
-    LEVEL_SHIF = 0.1
-    e_ai_a = lib.direct_sum('a-i->ai', mo_ea[viridxa], mo_ea[occidxa]).ravel()
-    e_ai_b = lib.direct_sum('a-i->ai', mo_eb[viridxb], mo_eb[occidxb]).ravel()
-    diag = (e_ai_a - freq,
-            e_ai_b - freq,
-            e_ai_a + freq,
-            e_ai_b + freq)
-    diag[0][diag[0] < LEVEL_SHIF] += LEVEL_SHIF
-    diag[1][diag[1] < LEVEL_SHIF] += LEVEL_SHIF
-    diag[2][diag[2] < LEVEL_SHIF] += LEVEL_SHIF
-    diag[3][diag[3] < LEVEL_SHIF] += LEVEL_SHIF
-
-    mo0a, mo0b = mf.mo_coeff
-    nao, nmoa = mo0a.shape
-    orbva = mo0a[:,viridxa]
-    orbvb = mo0b[:,viridxb]
-    orboa = mo0a[:,occidxa]
-    orbob = mo0b[:,occidxb]
-    nvira = orbva.shape[1]
-    nvirb = orbvb.shape[1]
-    nocca = orboa.shape[1]
-    noccb = orbob.shape[1]
-    h1a = h1[0].reshape(-1,nvira*nocca)
-    h1b = h1[1].reshape(-1,nvirb*noccb)
-    ncomp = h1a.shape[0]
-
-    mo1base = numpy.hstack((-h1a/diag[0],
-                            -h1b/diag[1],
-                            -h1a/diag[2],
-                            -h1b/diag[3]))
-
-    offsets = numpy.cumsum((nocca*nvira, noccb*nvirb, nocca*nvira))
-    vresp = mf.gen_response(hermi=0)
-    def vind(xys):
-        nz = len(xys)
-        dm1a = numpy.empty((nz,nao,nao))
-        dm1b = numpy.empty((nz,nao,nao))
-        for i in range(nz):
-            xa, xb, ya, yb = numpy.split(xys[i], offsets)
-            dmx = reduce(numpy.dot, (orbva, xa.reshape(nvira,nocca)  , orboa.T))
-            dmy = reduce(numpy.dot, (orboa, ya.reshape(nvira,nocca).T, orbva.T))
-            dm1a[i] = dmx + dmy  # AX + BY
-            dmx = reduce(numpy.dot, (orbvb, xb.reshape(nvirb,noccb)  , orbob.T))
-            dmy = reduce(numpy.dot, (orbob, yb.reshape(nvirb,noccb).T, orbvb.T))
-            dm1b[i] = dmx + dmy  # AX + BY
-
-        v1ao = vresp(numpy.stack((dm1a,dm1b)))
-        v1voa = lib.einsum('xpq,pi,qj->xij', v1ao[0], orbva, orboa).reshape(nz,-1)
-        v1vob = lib.einsum('xpq,pi,qj->xij', v1ao[1], orbvb, orbob).reshape(nz,-1)
-        v1ova = lib.einsum('xpq,pi,qj->xji', v1ao[0], orboa, orbva).reshape(nz,-1)
-        v1ovb = lib.einsum('xpq,pi,qj->xji', v1ao[1], orbob, orbvb).reshape(nz,-1)
-
-        for i in range(nz):
-            xa, xb, ya, yb = numpy.split(xys[i], offsets)
-            v1voa[i] += (e_ai_a - freq - diag[0]) * xa
-            v1voa[i] /= diag[0]
-            v1vob[i] += (e_ai_b - freq - diag[1]) * xb
-            v1vob[i] /= diag[1]
-            v1ova[i] += (e_ai_a + freq - diag[2]) * ya
-            v1ova[i] /= diag[2]
-            v1ovb[i] += (e_ai_b + freq - diag[3]) * yb
-            v1ovb[i] /= diag[3]
-        v = numpy.hstack((v1voa, v1vob, v1ova, v1ovb))
-        return v
-
-    # FIXME: krylov solver is not accurate enough for many freqs. Using tight
-    # tol and lindep could offer small help. A better linear equation solver
-    # is needed.
-    mo1 = lib.krylov(vind, mo1base, tol=tol, max_cycle=max_cycle,
-                     hermi=hermi, lindep=1e-18, verbose=log)
-    log.timer('krylov solver in CPHF', *t0)
-
-    dm1a = numpy.empty((ncomp,nao,nao))
-    dm1b = numpy.empty((ncomp,nao,nao))
-    for i in range(ncomp):
-        xa, xb, ya, yb = numpy.split(mo1[i], offsets)
-        dmx = reduce(numpy.dot, (orbva, xa.reshape(nvira,nocca)  *2, orboa.T))
-        dmy = reduce(numpy.dot, (orboa, ya.reshape(nvira,nocca).T*2, orbva.T))
-        dm1a[i] = dmx + dmy
-        dmx = reduce(numpy.dot, (orbvb, xb.reshape(nvirb,noccb)  *2, orbob.T))
-        dmy = reduce(numpy.dot, (orbob, yb.reshape(nvirb,noccb).T*2, orbvb.T))
-        dm1b[i] = dmx + dmy
-
-    v1ao = vresp(numpy.stack((dm1a,dm1b)))
-    mo_e1_a = lib.einsum('xpq,pi,qj->xij', v1ao[0], orboa, orboa)
-    mo_e1_b = lib.einsum('xpq,pi,qj->xij', v1ao[1], orbob, orbob)
-    mo_e1 = (mo_e1_a, mo_e1_b)
-    xa, xb, ya, yb = numpy.split(mo1, offsets, axis=1)
-    mo1 = (xa.reshape(ncomp,nvira,nocca),
-           xb.reshape(ncomp,nvirb,noccb),
-           ya.reshape(ncomp,nvira,nocca),
-           yb.reshape(ncomp,nvirb,noccb))
-    return mo1, mo_e1
-
-
-def polarizability_with_freq(polobj, freq=None):
-    log = logger.new_logger(polobj)
-    mf = polobj._scf
-    mol = mf.mol
-    mo_energy = mf.mo_energy
-    mo_coeff = mf.mo_coeff
-    mo_occ = mf.mo_occ
-    occidxa = mo_occ[0] > 0
-    occidxb = mo_occ[1] > 0
-    mo0a, mo0b = mo_coeff
-    orboa = mo0a[:, occidxa]
-    orbva = mo0a[:,~occidxa]
-    orbob = mo0b[:, occidxb]
-    orbvb = mo0b[:,~occidxb]
-
-    charges = mol.atom_charges()
-    coords  = mol.atom_coords()
-    charge_center = numpy.einsum('i,ix->x', charges, coords) / charges.sum()
-    with mol.with_common_orig(charge_center):
-        int_r = mol.intor_symmetric('int1e_r', comp=3)
-
-    h1a = lib.einsum('xpq,pi,qj->xij', int_r, orbva.conj(), orboa)
-    h1b = lib.einsum('xpq,pi,qj->xij', int_r, orbvb.conj(), orbob)
-    mo1 = ucphf_with_freq(mf, mo_energy, mo_occ, (h1a,h1b), freq,
-                          polobj.max_cycle_cphf, polobj.conv_tol,
-                          verbose=log)[0]
-
-    # *-1 from the definition of dipole moment.
-    e2 = -numpy.einsum('xpi,ypi->xy', h1a, mo1[0])
-    e2 -= numpy.einsum('xpi,ypi->xy', h1b, mo1[1])
-    e2 -= numpy.einsum('xpi,ypi->xy', h1a, mo1[2])
-    e2 -= numpy.einsum('xpi,ypi->xy', h1b, mo1[3])
-
-    log.debug('Polarizability tensor with freq %s', freq)
-    log.debug('%s', e2)
-    return e2
-
-
-class Polarizability(lib.StreamObject):
-    def __init__(self, mf):
-        mol = mf.mol
-        self.mol = mol
-        self.verbose = mol.verbose
-        self.stdout = mol.stdout
-        self._scf = mf
-
-        self.cphf = True
-        self.max_cycle_cphf = 20
-        self.conv_tol = 1e-9
-
-        self._keys = set(self.__dict__.keys())
-
-
-    def gen_vind(self, mf, mo_coeff, mo_occ):
-        '''Induced potential'''
-        vresp = mf.gen_response(hermi=1)
-        occidxa = mo_occ[0] > 0
-        occidxb = mo_occ[1] > 0
-        mo0a, mo0b = mo_coeff
-        orboa = mo0a[:, occidxa]
-        orbob = mo0b[:, occidxb]
-        nocca = orboa.shape[1]
-        noccb = orbob.shape[1]
-        nmoa = mo0a.shape[1]
-        nmob = mo0b.shape[1]
+    ea_vo, eb_vo = polobj._get_e_vo()
+    nvira, nocca = ea_vo.shape
+    nvirb, noccb = eb_vo.shape
+    h1a, h1b = polobj.get_h1vo(picture_change)
+    
+    if freq == 0:
         def vind(mo1):
-            mo1 = mo1.reshape(-1,nmoa*nocca+nmob*noccb)
-            mo1a = mo1[:,:nmoa*nocca].reshape(-1,nmoa,nocca)
-            mo1b = mo1[:,nmoa*nocca:].reshape(-1,nmob,noccb)
-            dm1a = lib.einsum('xai,pa,qi->xpq', mo1a, mo0a, orboa.conj())
-            dm1b = lib.einsum('xai,pa,qi->xpq', mo1b, mo0b, orbob.conj())
-            dm1a = dm1a + dm1a.transpose(0,2,1).conj()
-            dm1b = dm1b + dm1b.transpose(0,2,1).conj()
-            v1ao = vresp(numpy.stack((dm1a,dm1b)))
-            v1a = lib.einsum('xpq,pi,qj->xij', v1ao[0], mo0a.conj(), orboa)
-            v1b = lib.einsum('xpq,pi,qj->xij', v1ao[1], mo0b.conj(), orbob)
-            v1mo = numpy.hstack((v1a.reshape(-1,nmoa*nocca),
-                                 v1b.reshape(-1,nmob*noccb)))
-            return v1mo.ravel()
-        return vind
+            mo1 = mo1.reshape(3,-1)
+            mo1a, mo1b = numpy.split(mo1, [nvira*nocca], axis=1)
+            mo1 = (mo1a.reshape(3,nvira,nocca), mo1b.reshape(3,nvirb,noccb))
 
+            v1a, v1b = polobj.get_v1vo(mo1, freq)
+            v1 = numpy.hstack(((v1a/ea_vo).reshape(3,-1),
+                               (v1b/eb_vo).reshape(3,-1)))
+            return v1.ravel()
+        
+        mo1base = -numpy.hstack(((h1a/ea_vo).reshape(3,-1),
+                                 (h1b/eb_vo).reshape(3,-1)))
+        mo1 = lib.krylov(vind, mo1base.ravel(), max_cycle=polobj.max_cycle_cphf,
+                         tol=polobj.conv_tol, verbose=log).reshape(3,-1)
+    
+        mo1a, mo1b = numpy.split(mo1, [nvira*nocca], axis=1)
+        mo1 = (mo1a.reshape(3,nvira,nocca), mo1b.reshape(3,nvirb,noccb))
+        
+    else:
+        sep = numpy.cumsum((nocca*nvira, nocca*nvira, noccb*nvirb))
+        def vind(mo1):
+            mo1 = mo1.reshape(3,-1)
+            mo1_pa, mo1_ma, mo1_pb, mo1_mb = numpy.split(mo1, sep, axis=1)
+            mo1 = (mo1_pa.reshape(3,nvira,nocca), mo1_ma.reshape(3,nvira,nocca),
+                   mo1_pb.reshape(3,nvirb,noccb), mo1_mb.reshape(3,nvirb,noccb))
+
+            v1 = rhf.get_v1(polobj, mo1, freq)
+            v1_pa, v1_pb = polobj._to_vo(v1)
+            v1_ma, v1_mb = polobj._to_vo((v1[0].transpose(0,2,1).conj(),
+                                         v1[1].transpose(0,2,1).conj()))
+
+            v1 = numpy.hstack(((v1_pa/(ea_vo+freq)).reshape(3,-1),
+                               (v1_ma/(ea_vo-freq)).reshape(3,-1),
+                               (v1_pb/(eb_vo+freq)).reshape(3,-1),
+                               (v1_mb/(eb_vo-freq)).reshape(3,-1)))
+            return v1.ravel()
+
+        mo1base = -numpy.hstack(((h1a/(ea_vo+freq)).reshape(3,-1),
+                                 (h1a/(ea_vo-freq)).reshape(3,-1),
+                                 (h1b/(eb_vo+freq)).reshape(3,-1),
+                                 (h1b/(eb_vo-freq)).reshape(3,-1)))
+        mo1 = lib.krylov(vind, mo1base.ravel(), max_cycle=polobj.max_cycle_cphf,
+                         tol=polobj.conv_tol, verbose=log).reshape(3,-1)
+        
+        mo1_pa, mo1_ma, mo1_pb, mo1_mb = numpy.split(mo1, sep, axis=1)
+        mo1 = (mo1_pa.reshape(3,nvira,nocca), mo1_ma.reshape(3,nvira,nocca),
+               mo1_pb.reshape(3,nvirb,noccb), mo1_mb.reshape(3,nvirb,noccb))
+    
+    log.timer('Krylov solver in UCPHF/KS', *t0)
+    return mo1
+
+def newton_solver(polobj, freq=0, picture_change=True, verbose=logger.WARN):
+    '''
+    1st-order CPHF/KS iterative solver by `scipy.optimize.newton_krylov`.
+    '''
+    from scipy.optimize import newton_krylov
+    log = logger.new_logger(verbose=verbose)
+    t0 = (logger.process_clock(), logger.perf_counter())
+
+    ea_vo, eb_vo = polobj._get_e_vo()
+    nvira, nocca = ea_vo.shape
+    nvirb, noccb = eb_vo.shape
+    h1a, h1b = polobj.get_h1vo(picture_change)
+    h1a = h1a.reshape(3,-1)
+    h1b = h1b.reshape(3,-1)
+
+    if freq == 0:
+        h1 = numpy.hstack((h1a, h1b))
+        def vind(mo1):
+            mo1a, mo1b = numpy.split(mo1, [nvira*nocca], axis=1)
+            mo1 = (mo1a.reshape(3,nvira,nocca), mo1b.reshape(3,nvirb,noccb))
+
+            v1a, v1b = polobj.get_v1vo(mo1, freq)
+            v1a += ea_vo * mo1[0]
+            v1b += eb_vo * mo1[1]
+
+            v1 = numpy.hstack((v1a.reshape(3,-1), v1b.reshape(3,-1)))
+            return v1 + h1
+        
+        mo1 = newton_krylov(vind, -h1, maxiter=polobj.max_cycle_cphf, f_tol=polobj.conv_tol)
+    
+        mo1a, mo1b = numpy.split(mo1, [nvira*nocca], axis=1)
+        mo1 = (mo1a.reshape(3,nvira,nocca), mo1b.reshape(3,nvirb,noccb))
+        
+    else:
+        h1 = numpy.hstack((h1a, h1a, h1b, h1b))
+        sep = numpy.cumsum((nocca*nvira, nocca*nvira, noccb*nvirb))
+        def vind(mo1):
+            mo1_pa, mo1_ma, mo1_pb, mo1_mb = numpy.split(mo1, sep, axis=1)
+            mo1 = (mo1_pa.reshape(3,nvira,nocca), mo1_ma.reshape(3,nvira,nocca),
+                   mo1_pb.reshape(3,nvirb,noccb), mo1_mb.reshape(3,nvirb,noccb))
+
+            v1 = rhf.get_v1(polobj, mo1, freq)
+            v1_pa, v1_pb = polobj._to_vo(v1)
+            v1_ma, v1_mb = polobj._to_vo((v1[0].transpose(0,2,1).conj(),
+                                         v1[1].transpose(0,2,1).conj()))
+
+            v1_pa += (ea_vo + freq) * mo1[0]
+            v1_ma += (ea_vo - freq) * mo1[1]
+            v1_pb += (eb_vo + freq) * mo1[2]
+            v1_mb += (eb_vo - freq) * mo1[3]
+
+            v1 = numpy.hstack((v1_pa.reshape(3,-1), v1_ma.reshape(3,-1),
+                               v1_pb.reshape(3,-1), v1_mb.reshape(3,-1)))
+            return v1 + h1
+
+        mo1 = newton_krylov(vind, -h1, maxiter=polobj.max_cycle_cphf, f_tol=polobj.conv_tol)
+        
+        mo1_pa, mo1_ma, mo1_pb, mo1_mb = numpy.split(mo1, sep, axis=1)
+        mo1 = (mo1_pa.reshape(3,nvira,nocca), mo1_ma.reshape(3,nvira,nocca),
+               mo1_pb.reshape(3,nvirb,noccb), mo1_mb.reshape(3,nvirb,noccb))
+
+    log.timer('Newton-Krylov solver in UCPHF/KS', *t0)
+    return mo1
+
+def direct_solver(polobj, freq=0, picture_change=True, verbose=logger.WARN):
+    '''
+    1st-order CPHF/KS direct solver by `numpy.linalg.solve`.
+    '''
+    log = logger.new_logger(verbose=verbose)
+    t0 = (logger.process_clock(), logger.perf_counter())
+
+    ea_vo, eb_vo = polobj._get_e_vo()
+    nvira, nocca = ea_vo.shape
+    nvirb, noccb = eb_vo.shape
+    h1a, h1b = polobj.get_h1vo(picture_change)
+    h1a = h1a.reshape(3,-1)
+    h1b = h1b.reshape(3,-1)
+    h1 = numpy.hstack((h1a, h1a.conj(), h1b, h1b.conj()))
+    sep = numpy.cumsum((nocca*nvira, nocca*nvira, noccb*nvirb))
+    
+    def vind(mo1):
+        mo1_pa, mo1_ma, mo1_pb, mo1_mb = numpy.split(mo1, sep)
+        mo1 = (mo1_pa.reshape(1,nvira,nocca), mo1_ma.reshape(1,nvira,nocca).conj(),
+               mo1_pb.reshape(1,nvirb,noccb), mo1_mb.reshape(1,nvirb,noccb).conj())
+
+        v1 = rhf.get_v1(polobj, mo1, freq)
+        v1_pa, v1_pb = polobj._to_vo(v1)
+        v1_ma, v1_mb = polobj._to_vo((v1[0].transpose(0,2,1).conj(),
+                                     v1[1].transpose(0,2,1).conj()))
+
+        v1_pa += (ea_vo + freq) * mo1[0]
+        v1_ma += (ea_vo - freq) * mo1[1]
+        v1_pb += (eb_vo + freq) * mo1[2]
+        v1_mb += (eb_vo - freq) * mo1[3]
+
+        v1 = numpy.concatenate((v1_pa.ravel(), v1_ma.ravel().conj(),
+                                v1_pb.ravel(), v1_mb.ravel().conj()))
+        return v1
+
+    size = h1[0].size
+    operator = numpy.empty((size, size))
+    iden = numpy.eye(size)
+    for i, row in enumerate(iden):
+        operator[:,i] = vind(row)
+    
+    mo1 = numpy.linalg.solve(operator, -h1.T).T
+    mo1_pa, mo1_ma, mo1_pb, mo1_mb = numpy.split(mo1, sep, axis=1)
+    mo1_pa = mo1_pa.reshape(3,nvira,nocca)
+    mo1_ma = mo1_ma.reshape(3,nvira,nocca).conj()
+    mo1_pb = mo1_pb.reshape(3,nvirb,noccb)
+    mo1_mb = mo1_mb.reshape(3,nvirb,noccb).conj()
+    
+    if freq == 0: mo1 = (mo1_pa, mo1_pb)
+    else: mo1 = (mo1_pa, mo1_ma, mo1_pb, mo1_mb)
+    
+    log.timer('Direct solver in UCPHF/KS', *t0)
+    return mo1
+
+
+class Polarizability(rhf.Polarizability):
+    def get_mo1(self, freq=0, picture_change=True, solver='krylov'):
+        '''
+        Generate the transformation matrix $U(0)$ or ($U(+\omega)$, $U(-\omega)$),
+        which is the coefficient matrix of the 1st-order derivative of MO.
+        '''
+        solver = solver.lower()
+        if   'direct' in solver: # exact solver
+            mo1 = direct_solver(self, freq, picture_change)
+        elif 'newton' in solver: # only newton-krylov recommended
+            mo1 = newton_solver(self, freq, picture_change)
+        elif 'krylov' in solver: # not recommended
+            mo1 = krylov_solver(self, freq, picture_change)
+        else:
+            raise NotImplementedError(solver)
+        return mo1
+    
+    def _get_e_vo(self) : return get_e_vo(self.mf)
+    def _to_vo(self, ao): return _to_vo(self.mf, ao)
+    def _to_vv(self, ao): return _to_vv(self.mf, ao)
+    def _to_oo(self, ao): return _to_oo(self.mf, ao)
+
+    get_dm1 = get_dm1
 
     polarizability = polarizability
-    polarizability_with_freq = polarizability_with_freq
+    hyperpolarizability = hyperpolarizability
 
-    hyper_polarizability = hyper_polarizability
 
-from pyscf import scf
-scf.uhf.UHF.Polarizability = lib.class_as_method(Polarizability)
+uhf.UHF.Polarizability = lib.class_as_method(Polarizability)
 
 
 if __name__ == '__main__':
@@ -361,9 +629,9 @@ if __name__ == '__main__':
     mol.build()
 
     mf = scf.UHF(mol).run(conv_tol=1e-14)
-    polar = mf.Polarizability().polarizability()
+    polobj = mf.Polarizability().polarizability()
     hpol = mf.Polarizability().hyper_polarizability()
-    print(polar)
+    print(polobj)
 
     mf.verbose = 0
     charges = mol.atom_charges()

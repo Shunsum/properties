@@ -21,13 +21,16 @@ Non-relativistic static and dynamic polarizability and hyper-polarizability tens
 (In testing)
 '''
 
-import warnings
-from pyscf.prop.polarizability.uhf import \
-        (polarizability, hyper_polarizability, polarizability_with_freq,
-         Polarizability)  # noqa
+from pyscf import lib
+from . import uhf
 
-warnings.warn('Module polarizability is under testing')
 
+class Polarizability(uhf.Polarizability):
+    pass
+
+
+from pyscf.dft import uks
+uks.UKS.Polarizability = lib.class_as_method(Polarizability)
 
 if __name__ == '__main__':
     import numpy
