@@ -5,7 +5,7 @@ from pyscf.lib import logger
 from . import ghf
 
 
-def get_dm1(polobj, mo1, freq=0):
+def get_dm1(polobj, mo1):
     '''
     Generate the 1st-order density matrix in AO basis.
     '''
@@ -17,12 +17,15 @@ def get_dm1(polobj, mo1, freq=0):
     viridx = n2c + numpy.where(mo_occ[n2c:]==0)[0]
     orbv = mo_coeff[:,viridx]
     orbo = mo_coeff[:,occidx]
-    if freq == 0 and len(mo1) != 2:
+    if len(mo1) == 2:
+        dm1  = lib.einsum('pj,xji,qi->xpq', orbv, mo1[0]       , orbo.conj())
+        dm1 += lib.einsum('pi,xji,qj->xpq', orbo, mo1[1].conj(), orbv.conj())
+    elif len(mo1) == 3:
         dm1  = lib.einsum('pj,xji,qi->xpq', orbv, mo1, orbo.conj())
         dm1 += dm1.transpose(0,2,1).conj()
     else:
-        dm1  = lib.einsum('pj,xji,qi->xpq', orbv, mo1[0]       , orbo.conj())
-        dm1 += lib.einsum('pi,xji,qj->xpq', orbo, mo1[1].conj(), orbv.conj())
+        raise ValueError('mo1 does not have the correct shape (3,nvir,nocc)'
+                         ' for freq = 0 or (2,3,nvir,nocc) for freq != 0.')
     return dm1
 
 def get_h1(polobj, picture_change=True):
@@ -105,7 +108,12 @@ def _block_diag(a, b):
 
 
 class Polarizability(ghf.Polarizability):
-    get_dm1 = get_dm1
+    @lib.with_doc(get_dm1.__doc__)
+    def get_dm1(self, freq=None, mo1=None, picture_change=True, solver='krylov'):
+        if freq is None: freq = 0
+        if mo1 is None: mo1 = self.get_mo1(freq, picture_change, solver)
+        return get_dm1(self, mo1)
+    
     get_h1 = get_h1
 
     @lib.with_doc(get_e_vo.__doc__)

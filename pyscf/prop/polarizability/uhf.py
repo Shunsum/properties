@@ -28,10 +28,11 @@ from pyscf.scf import hf, uhf, _response_functions
 from . import rhf
 
 
-def get_dm1(polobj, mo1, freq=0):
+def get_dm1(polobj, mo1):
     '''
     Generate the 1st-order density matrix in AO basis.
     '''
+    assert isinstance(mo1, tuple)
     mf = polobj.mf
     mo_coeff = mf.mo_coeff
     occidxa = mf.mo_occ[0] > 0
@@ -40,16 +41,19 @@ def get_dm1(polobj, mo1, freq=0):
     orboa = mo_coeff[0][:, occidxa]
     orbvb = mo_coeff[1][:,~occidxb]
     orbob = mo_coeff[1][:, occidxb]
-    if freq == 0 and len(mo1) != 4:
+    if len(mo1) == 4:
+        dm1a = lib.einsum('pj,xji,qi->xpq', orbva, mo1[0]       , orboa.conj())
+        dm1a+= lib.einsum('pi,xji,qj->xpq', orboa, mo1[1].conj(), orbva.conj())
+        dm1b = lib.einsum('pj,xji,qi->xpq', orbvb, mo1[2]       , orbob.conj())
+        dm1b+= lib.einsum('pi,xji,qj->xpq', orbob, mo1[3].conj(), orbvb.conj())
+    elif len(mo1) == 2:
         dm1a = lib.einsum('pj,xji,qi->xpq', orbva, mo1[0], orboa.conj())
         dm1a+= dm1a.transpose(0,2,1).conj()
         dm1b = lib.einsum('pj,xji,qi->xpq', orbvb, mo1[1], orbob.conj())
         dm1b+= dm1b.transpose(0,2,1).conj()
     else:
-        dm1a = lib.einsum('pj,xji,qi->xpq', orbva, mo1[0]       , orboa.conj())
-        dm1a+= lib.einsum('pi,xji,qj->xpq', orboa, mo1[1].conj(), orbva.conj())
-        dm1b = lib.einsum('pj,xji,qi->xpq', orbvb, mo1[2]       , orbob.conj())
-        dm1b+= lib.einsum('pi,xji,qj->xpq', orbob, mo1[3].conj(), orbvb.conj())
+        raise ValueError('The number of mo1\'s should be 2 for freq = 0'
+                         ' and 4 for freq != 0 in unrestricted CPHF/KS.')
     return (dm1a, dm1b)
 
 def get_e_vo(mf):
@@ -163,8 +167,8 @@ def hyperpolarizability(polobj, freq=0, type='SHG', picture_change=True, solver=
 
     if freq == 0:
         mo1 = polobj.get_mo1(freq, picture_change, solver)
-        f1 = polobj.get_f1vv(mo1, freq, picture_change)
-        e1 = polobj.get_e1(mo1, freq, picture_change)
+        f1 = polobj.get_f1vv(mo1, picture_change)
+        e1 = polobj.get_e1(mo1, picture_change)
 
         # beta(0;0,0)
         beta = -lib.einsum('xjl,yji,zli->xyz', f1[0], mo1[0].conj(), mo1[0])
@@ -179,7 +183,7 @@ def hyperpolarizability(polobj, freq=0, type='SHG', picture_change=True, solver=
             ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
             xctype = ni._xc_type(mf.xc)
             dm = mf.make_rdm1()
-            dm1 = polobj.get_dm1(mo1, freq)
+            dm1 = polobj.get_dm1(mo1=mo1)
 
             if xctype == 'LDA':
                 ao = ni.eval_ao(mf.mol, mf.grids.coords)
@@ -211,16 +215,16 @@ def hyperpolarizability(polobj, freq=0, type='SHG', picture_change=True, solver=
     
     elif type.upper() == 'SHG':
         mo1_2o = polobj.get_mo1(freq*2, picture_change, solver)
-        f1_p2o = polobj.get_f1vv(mo1_2o, freq*2, picture_change)
+        f1_p2o = polobj.get_f1vv(mo1_2o, picture_change)
         f1_m2o = (f1_p2o[0].transpose(0,2,1).conj(),
                   f1_p2o[1].transpose(0,2,1).conj())
-        e1_p2o = polobj.get_e1(mo1_2o, freq*2, picture_change)
+        e1_p2o = polobj.get_e1(mo1_2o, picture_change)
         e1_m2o = (e1_p2o[0].transpose(0,2,1).conj(),
                   e1_p2o[1].transpose(0,2,1).conj())
         
         mo1_1o = polobj.get_mo1(freq, picture_change, solver)
-        f1_p1o = polobj.get_f1vv(mo1_1o, freq, picture_change)
-        e1_p1o = polobj.get_e1(mo1_1o, freq, picture_change)
+        f1_p1o = polobj.get_f1vv(mo1_1o, picture_change)
+        e1_p1o = polobj.get_e1(mo1_1o, picture_change)
         
         # beta(-2omega;omega,omega)
         beta = -lib.einsum('xjl,yji,zli->xyz', f1_m2o[0], mo1_1o[1].conj(), mo1_1o[0])
@@ -242,10 +246,10 @@ def hyperpolarizability(polobj, freq=0, type='SHG', picture_change=True, solver=
             ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
             xctype = ni._xc_type(mf.xc)
             dm = mf.make_rdm1()
-            dm1_p2o = polobj.get_dm1(mo1_2o, freq*2)
+            dm1_p2o = polobj.get_dm1(mo1=mo1_2o)
             dm1_m2o = (dm1_p2o[0].transpose(0,2,1).conj(),
                        dm1_p2o[1].transpose(0,2,1).conj())
-            dm1_p1o = polobj.get_dm1(mo1_1o, freq)
+            dm1_p1o = polobj.get_dm1(mo1=mo1_1o)
 
             if xctype == 'LDA':
                 ao = ni.eval_ao(mf.mol, mf.grids.coords)
@@ -287,10 +291,10 @@ def hyperpolarizability(polobj, freq=0, type='SHG', picture_change=True, solver=
     
     elif type.upper() == 'EOPE' or 'OR':
         mo1_1o = polobj.get_mo1(freq, picture_change, solver)
-        f1_p1o = polobj.get_f1vv(mo1_1o, freq, picture_change)
+        f1_p1o = polobj.get_f1vv(mo1_1o, picture_change)
         f1_m1o = (f1_p1o[0].transpose(0,2,1).conj(),
                   f1_p1o[1].transpose(0,2,1).conj())
-        e1_p1o = polobj.get_e1(mo1_1o, freq, picture_change)
+        e1_p1o = polobj.get_e1(mo1_1o, picture_change)
         e1_m1o = (e1_p1o[0].transpose(0,2,1).conj(),
                   e1_p1o[1].transpose(0,2,1).conj())
 
@@ -329,8 +333,8 @@ def hyperpolarizability(polobj, freq=0, type='SHG', picture_change=True, solver=
             ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
             xctype = ni._xc_type(mf.xc)
             dm = mf.make_rdm1()
-            dm1 = polobj.get_dm1(mo1, 0)
-            dm1_p1o = polobj.get_dm1(mo1_1o, freq)
+            dm1 = polobj.get_dm1(mo1=mo1)
+            dm1_p1o = polobj.get_dm1(mo1=mo1_1o)
             dm1_m1o = (dm1_p1o[0].transpose(0,2,1).conj(),
                        dm1_p1o[1].transpose(0,2,1).conj())
 
@@ -416,7 +420,7 @@ def krylov_solver(polobj, freq=0, picture_change=True, verbose=logger.WARN):
             mo1a, mo1b = numpy.split(mo1, [nvira*nocca], axis=1)
             mo1 = (mo1a.reshape(3,nvira,nocca), mo1b.reshape(3,nvirb,noccb))
 
-            v1a, v1b = polobj.get_v1vo(mo1, freq)
+            v1a, v1b = polobj.get_v1vo(mo1)
             v1 = numpy.hstack(((v1a/ea_vo).reshape(3,-1),
                                (v1b/eb_vo).reshape(3,-1)))
             return v1.ravel()
@@ -437,7 +441,7 @@ def krylov_solver(polobj, freq=0, picture_change=True, verbose=logger.WARN):
             mo1 = (mo1_pa.reshape(3,nvira,nocca), mo1_ma.reshape(3,nvira,nocca),
                    mo1_pb.reshape(3,nvirb,noccb), mo1_mb.reshape(3,nvirb,noccb))
 
-            v1 = rhf.get_v1(polobj, mo1, freq)
+            v1 = rhf.get_v1(polobj, mo1)
             v1_pa, v1_pb = polobj._to_vo(v1)
             v1_ma, v1_mb = polobj._to_vo((v1[0].transpose(0,2,1).conj(),
                                          v1[1].transpose(0,2,1).conj()))
@@ -483,7 +487,7 @@ def newton_solver(polobj, freq=0, picture_change=True, verbose=logger.WARN):
             mo1a, mo1b = numpy.split(mo1, [nvira*nocca], axis=1)
             mo1 = (mo1a.reshape(3,nvira,nocca), mo1b.reshape(3,nvirb,noccb))
 
-            v1a, v1b = polobj.get_v1vo(mo1, freq)
+            v1a, v1b = polobj.get_v1vo(mo1)
             v1a += ea_vo * mo1[0]
             v1b += eb_vo * mo1[1]
 
@@ -503,7 +507,7 @@ def newton_solver(polobj, freq=0, picture_change=True, verbose=logger.WARN):
             mo1 = (mo1_pa.reshape(3,nvira,nocca), mo1_ma.reshape(3,nvira,nocca),
                    mo1_pb.reshape(3,nvirb,noccb), mo1_mb.reshape(3,nvirb,noccb))
 
-            v1 = rhf.get_v1(polobj, mo1, freq)
+            v1 = rhf.get_v1(polobj, mo1)
             v1_pa, v1_pb = polobj._to_vo(v1)
             v1_ma, v1_mb = polobj._to_vo((v1[0].transpose(0,2,1).conj(),
                                          v1[1].transpose(0,2,1).conj()))
@@ -547,7 +551,7 @@ def direct_solver(polobj, freq=0, picture_change=True, verbose=logger.WARN):
         mo1 = (mo1_pa.reshape(1,nvira,nocca), mo1_ma.reshape(1,nvira,nocca).conj(),
                mo1_pb.reshape(1,nvirb,noccb), mo1_mb.reshape(1,nvirb,noccb).conj())
 
-        v1 = rhf.get_v1(polobj, mo1, freq)
+        v1 = rhf.get_v1(polobj, mo1)
         v1_pa, v1_pb = polobj._to_vo(v1)
         v1_ma, v1_mb = polobj._to_vo((v1[0].transpose(0,2,1).conj(),
                                      v1[1].transpose(0,2,1).conj()))
@@ -598,12 +602,16 @@ class Polarizability(rhf.Polarizability):
             raise NotImplementedError(solver)
         return mo1
     
+    @lib.with_doc(get_dm1.__doc__)
+    def get_dm1(self, freq=None, mo1=None, picture_change=True, solver='krylov'):
+        if freq is None: freq = 0
+        if mo1 is None: mo1 = self.get_mo1(freq, picture_change, solver)
+        return get_dm1(self, mo1)
+
     def _get_e_vo(self) : return get_e_vo(self.mf)
     def _to_vo(self, ao): return _to_vo(self.mf, ao)
     def _to_vv(self, ao): return _to_vv(self.mf, ao)
     def _to_oo(self, ao): return _to_oo(self.mf, ao)
-
-    get_dm1 = get_dm1
 
     polarizability = polarizability
     hyperpolarizability = hyperpolarizability
