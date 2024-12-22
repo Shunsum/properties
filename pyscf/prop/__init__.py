@@ -14,6 +14,9 @@
 
 __version__ = '0.1.0'
 
+import warnings;
+warnings.filterwarnings("ignore", category=UserWarning)
+
 from . import efg
 from . import freq
 from . import gtensor

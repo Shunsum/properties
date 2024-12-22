@@ -68,7 +68,7 @@ def polarizability(polobj, freq=(0,0), **kwargs):
     '''
     assert isinstance(freq, tuple) and len(freq) == 2
     log = logger.new_logger(polobj)
-    h1 = polobj.get_h1(**kwargs)
+    h1 = polobj._to_vo(polobj.get_h1(**kwargs))
     try : mo12 = polobj.mo1[freq[1]]
     except KeyError: mo12 = polobj.solve_mo1(freq[1], **kwargs)
 
@@ -439,7 +439,7 @@ class Polarizability(CPHFBase):
         coords  = mol.atom_coords()
         charge_center = lib.einsum('i,ix->x', charges, coords) / charges.sum()
         with mol.with_common_orig(charge_center):
-            if isinstance(mf, sfx2c1e.SFX2C1E_SCF) and picture_change:
+            if isinstance(mf, SFX2C1E_SCF) and picture_change:
                 xmol = mf.with_x2c.get_xmol()[0]
                 nao = xmol.nao
                 prp = xmol.intor_symmetric('int1e_sprsp').reshape(3,4,nao,nao)[:,3]

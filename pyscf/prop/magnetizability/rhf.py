@@ -32,7 +32,7 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.scf import jk, _response_functions  # noqa
 from pyscf.prop.nmr import rhf as rhf_nmr
-from pyscf.prop.polarizability.rhf import PropertyHelper
+from pyscf.prop.cphf import CPHFBase
 from pyscf.data import nist
 
 def el_mag_moment(magobj, gauge_orig=None, with_imag=False):
@@ -188,7 +188,7 @@ def _get_ao_coords(mol):
     return ao_coords
 
 
-class Magnetizability(PropertyHelper):
+class Magnetizability(CPHFBase):
     def __init__(self, mf):
         mol = mf.mol
         self.mol = mol

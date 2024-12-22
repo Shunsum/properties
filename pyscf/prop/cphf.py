@@ -24,20 +24,22 @@ class CPHFBase(lib.StreamObject):
         '''The induced potential matrix in AO basis.'''
         if isinstance(freq, (int, float)):
             dm_deriv = self.get_dm1(mo_deriv, freq, **kwargs)
+            hermi = 1 if freq == 0 else 0
         elif len(freq) == 2:
             dm_deriv = self.get_dm2(mo_deriv, freq, **kwargs)
+            hermi = 1 if all(f == 0 for f in freq) else 0
         else:
             raise NotImplementedError(freq)
+        
         mf = self.mf
-        if freq == 0 or all(f == 0 for f in freq):
-            vind = mf.gen_response(hermi=1)
-        else:
-            vind = mf.gen_response(hermi=0)
-            if isinstance(mf, X2C1E_GSCF) and \
+        vind = mf.gen_response(hermi=hermi)
+        # GKS collinear response function does not support complex density matrices
+        if not hermi and isinstance(mf, X2C1E_GSCF) and \
             hasattr(mf, 'collinear') and mf.collinear == 'col':
-                dmr_deriv = dm_deriv.real
-                dmi_deriv = dm_deriv.imag
-                return vind(dmr_deriv) + vind(dmi_deriv)*1j
+            dmr_deriv = dm_deriv.real
+            dmi_deriv = dm_deriv.imag
+            return vind(dmr_deriv) + vind(dmi_deriv)*1j
+        
         return vind(dm_deriv)
 
     def get_f1(self, mo1=None, freq=0, **kwargs):
