@@ -88,7 +88,7 @@ class CPHFBase(lib.StreamObject):
         if mo2 is None and with_mo2:
             try: mo2 = self.mo2[freq]
             except KeyError: mo2 = self.solve_mo2(freq=freq, **kwargs)
-        f2 = self.get_vind(mo2, freq, with_mo2, **kwargs)
+        f2 = self.get_vind(mo2, freq, with_mo2=with_mo2, **kwargs)
         if hasattr(self, 'get_h2'):
             f2 += self.get_h2(**kwargs)
         if self.with_s1:
@@ -213,8 +213,8 @@ class CPHFBase(lib.StreamObject):
             except KeyError: mo11 = self.solve_mo1(freq=w, **kwargs)
             f10 = self.get_f1(mo10, 0, **kwargs)
             f11 = self.get_f1(mo11, w, **kwargs)
-            e10 = self.get_e1(mo1, 0, **kwargs)
-            e11 = self.get_e1(mo1, w, **kwargs)
+            e10 = self.get_e1(mo10, 0, **kwargs)
+            e11 = self.get_e1(mo11, w, **kwargs)
             mo11 = mo11[0]
             if self.with_s1: # mo1.shape = (3,ntot,nocc)
                 mf = self.mf

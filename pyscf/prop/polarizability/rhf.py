@@ -67,6 +67,9 @@ def polarizability(polobj, freq=(0,0), **kwargs):
             are supported. Default is 'krylov'.
     '''
     assert isinstance(freq, tuple) and len(freq) == 2
+    assert abs(freq[0]) == abs(freq[1]) or 0 in freq, '''
+    For a given frequency w, only 9 choices of (a,b) are allowed,
+    where a, b are in {0, w, -w}.'''
     log = logger.new_logger(polobj)
     h1 = polobj._to_vo(polobj.get_h1(**kwargs))
     try : mo12 = polobj.mo1[freq[1]]
@@ -117,6 +120,9 @@ def hyperpolarizability(polobj, freq=(0,0,0), **kwargs):
             are supported. Default is 'krylov'.
     '''
     assert isinstance(freq, tuple) and len(freq) == 3
+    assert len({abs(f) for f in freq if f != 0}) in (0, 1), '''
+    For a given frequency w, only 27 choices of (a,b,c) are allowed,
+    where a, b, c are in {0, w, -w}.'''
     log = logger.new_logger(polobj)
     mf = polobj.mf
 
@@ -361,9 +367,7 @@ class Polarizability(CPHFBase):
         occidx = mf.mo_occ > 0
         orbv = mo_coeff[:,~occidx]
         orbo = mo_coeff[:, occidx]
-        nao = mo_coeff.shape[-1]
-        dm22 = numpy.zeros((3,3,nao,nao))
-        dm21 = numpy.zeros((3,3,nao,nao))
+        dm22 = dm21 = 0
 
         if freq == (0,0): # D(0,0)
             if with_mo2:
@@ -378,12 +382,13 @@ class Polarizability(CPHFBase):
                     dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo1, mo1.conj(),
                                                              orbv.conj()) * 2
             dm2 = dm22 + dm21
-            dm2+= dm2.transpose(0,1,3,2).conj()
+            try: dm2+= dm2.transpose(0,1,3,2).conj()
+            except SyntaxError: pass
         
         else: # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
             if with_mo2:
                 dm22 = lib.einsum('pj,xyji,qi->xypq', mo_coeff, mo2[0], orbo.conj()) * 2
-                dm22+= lib.einsum('pi,xyji,qj->xypq', mo_coeff, mo2[1], orbo.conj()) * 2
+                dm22+= lib.einsum('pi,xyji,qj->xypq', orbo, mo2[1], mo_coeff.conj()) * 2
             if with_mo1:
                 if freq[1] == freq[0]: # D(w,w)
                     try: mo1 = self.mo1[freq[0]]
