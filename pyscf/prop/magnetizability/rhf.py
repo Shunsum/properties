@@ -46,11 +46,10 @@ def el_mag_moment(magobj, gauge_orig=None, with_imag=False):
             jk1 = get_jk1(mol, dm0) * .5
             mu = -lib.einsum('vu,xuv->x', dm0, h1+jk1)
             s1 = magobj._to_oo(get_s1(mol))
-            occ = mf.mo_occ
-            mu += lib.einsum('xii,i->x', s1, mf.mo_energy[occ>0]) * 2
+            mu += lib.einsum('xii,i->x', s1, mf.mo_energy[mf.mo_occ>0]) * 2
         else:
             mu = -lib.einsum('vu,xuv->x', dm0, h1)
-        return mu * -1j
+        return mu
     else:
         return numpy.zeros(3)
 
@@ -63,14 +62,16 @@ def diamag(magobj, gauge_orig=None):
     h2 = get_h2(mol, gauge_orig)
     if gauge_orig is None:
         jk2 = get_jk2(mol, dm0) * .5
-        diamag = -lib.einsum('vu,xyuv->xy', dm0, h2+jk2)
+        xi = -lib.einsum('vu,xyuv->xy', dm0, h2+jk2)
         s2 = magobj._to_oo(get_s2(mol))
-        occ = mf.mo_occ
-        diamag += lib.einsum('xyii,i->xy', s2, mf.mo_energy[occ>0]) * 2
+        mo_occ = mf.mo_occ
+        mo_energy = mf.mo_energy[mo_occ>0]
+        mo_occ = mo_occ[mo_occ>0]
+        xi += lib.einsum('xyii,i,i->xy', s2, mo_occ, mo_energy)
     else:
-        diamag = -lib.einsum('vu,xyuv->xy', dm0, h2)
+        xi = -lib.einsum('vu,xyuv->xy', dm0, h2)
     
-    return diamag
+    return xi
 
 def paramag(magobj, gauge_orig=None, freq=0):
     '''Paramagnetic magnetizability'''
@@ -85,96 +86,95 @@ def paramag(magobj, gauge_orig=None, freq=0):
     occidx = mo_occ > 0
     orbo = mo_coeff[:,occidx]
 
-    mo1 = magobj.get_mo1()
+    mo1 = magobj.solve_mo1(freq=freq)
     e0to = magobj.get_e0to()
-    h1 = magobj._to_to(magobj.get_h1(gauge_orig))
-    jk1 = magobj._to_to(magobj.get_jk1(mol, mf.make_rdm1()))
-    s1 = magobj._to_to(magobj.get_s1(mol))
-    import pdb; pdb.set_trace()
-    mag_para = numpy.einsum('xji,yji,ji->xy', mo1, mo1, e0to) * 2
-    mag_para-= numpy.einsum('xji,yji,i->xy', mo1, s1, mo_energy[occidx]) * 4
-    mag_para+= numpy.einsum('xji,yji->xy', mo1, h1+jk1) * 4
-    # + c.c.
+    s1 = magobj._to_to(magobj.get_s1())
+    f1 = magobj._to_to(magobj.get_f1(mo1, freq))
+    v1 = magobj._to_to(magobj.get_vind(mo1, freq))
+    
+    mag_para = numpy.einsum('xji,yji,i->xy', mo1.conj(), s1, mo_energy[occidx]) * 2
+    mag_para-= numpy.einsum('xji,yji->xy', mo1, f1.conj()) * 2
     mag_para+= mag_para.T
-    v1 = magobj._to_to(magobj.get_v1(mo1, with_s1=True))
-    mag_para+= numpy.einsum('xji,yji->xy', mo1, v1) * 4
+    mag_para-= numpy.einsum('xji,yji,ji->xy', mo1, mo1.conj(), e0to) * 2
+    mag_para+= numpy.einsum('xji,yji->xy', v1, mo1.conj()) * 2
+    # + c.c.
+    mag_para+= mag_para.conj()
 
-    return -mag_para
+    return mag_para.real
 
 def get_h1(mol, gauge_orig=None, picture_change=True):
-    r'''First-order core Hamiltonian multiplied by i wrt the external magnetic field.
-        h1 = (\mu|g kin|\nu) + (\mu|g nuc|\nu) + .5*(\mu|rxp|\nu) + .5*(\mu|Rxp|\nu)'''
+    r'''The first-order core Hamiltonian wrt the external magnetic field.
+        Without gauge origin (using GIAO):
+            h_{\mu\nu}^(1) = (\mu|g kin|\nu) - (\mu|Rxp|\nu) * .5
+                           + (\mu|g nuc|\nu) + (\mu|rxp|\nu) * .5
+        With a gauge origin:
+            h_{\mu\nu}^(1) = (\mu|rxp|\nu) * .5'''
     if gauge_orig is None:
-        h1  = mol.intor_asymmetric('int1e_igkin', comp=3)
+        h1  = mol.intor('int1e_igkin', comp=3)
         h1 += mol.intor_asymmetric('int1e_ignuc', comp=3)
-        h1 += mol.intor_asymmetric('int1e_giao_irjxp', comp=3) * .5
-        LC = lib.LeviCivita
-        r_nuc = _get_ao_coords(mol)
-        h1 -= lib.einsum('xij,vi,juv->xuv', LC, r_nuc, mol.intor_asymmetric('int1e_ipovlp', comp=3)) * .5
+        h1 += mol.intor('int1e_giao_irjxp', comp=3) * .5
     else:
         mol.set_common_origin(gauge_orig)
-        h1 = mol.intor('int1e_cg_irxp', comp=3) * .5
-    return h1
+        h1 = mol.intor_asymmetric('int1e_cg_irxp', comp=3) * .5
+    return h1 * -1j
 
 def get_jk1(mol, dm0):
-    r'''First-order JK multiplied by i wrt the external magnetic field.
+    r'''The first-order JK wrt the external magnetic field.
         J_{\mu\nu}^(1) = D_{\lambda\kappa}^0 (g\mu\nu|\kappa\lambda) * 2
-        K_{\mu\nu}^(1) = D_{\nu\kappa}^0 (g\mu\nu|\kappa\lambda) * 2
+        K_{\mu\nu}^(1) = D_{\lambda\kappa}^0 (g\mu\lambda|\kappa\nu) * 2
         JK^(1) = J^(1) - .5*K^(1)'''
     j1 = jk.get_jk(mol, dm0, 'ijkl,lk->a2ij', 'int2e_ig1', 'a4ij', comp=3, hermi=2)
     k1 = jk.get_jk(mol, dm0, 'ijkl,jk->s1il', 'int2e_ig1', 'a4ij', comp=3, hermi=0)
-    return j1 * 2 - k1
+    return (j1 * 2 - k1) * -1j
 
 def get_s1(mol):
-    '''First-order overlap matrix multiplied by i wrt the external magnetic field.'''
-    return mol.intor_asymmetric('int1e_igovlp', comp=3)
+    r'''The first-order overlap matrix wrt the external magnetic field.
+        S_{\mu\nu}^(1) = (\mu|g|\nu)'''
+    return mol.intor_asymmetric('int1e_igovlp', comp=3) * -1j
 
-def get_h2(mol, gauge_orig):
-    '''Second-order core Hamiltonian wrt the external magnetic field.'''
+def get_h2(mol, gauge_orig=None, picture_change=True):
+    r'''The second-order core Hamiltonian wrt the external magnetic field.
+        Without gauge origin (using GIAO):
+            h_{\mu\nu}^(2) = (\mu|gg kin|\nu) + (\mu|gg nuc|\nu)
+                + .5 (\mu|g rxp|\nu) - .5 (\mu|g Rxp|\nu) + transpose(x,y)
+                + .25 (\mu|r·r-rr|\nu) - .5 (\mu|R·r-Rr|\nu) + .25 (\mu|R·R-RR|\nu)
+        With a gauge origin:
+            h_{\mu\nu}^(2) = .25 (\mu|r·r-rr|\nu)'''
     nao = mol.nao
     if gauge_orig is None:
-        # .25 (\mu|r·r-rr|\nu) - .5 (\mu|R·r-Rr|\nu) + .25 (\mu|R·R-RR|\nu)
-        h2 = mol.intor_symmetric('int1e_rr_origj', comp=9).reshape(3,3,nao,nao) * .25
-        r_nuc = _get_ao_coords(mol)
-        h2 -= lib.einsum('vx,yuv->xyuv', r_nuc, mol.intor_symmetric('int1e_r', comp=3)) * .5
-        h2 += lib.einsum('vx,vy,uv->xyuv', r_nuc, r_nuc, mol.intor_symmetric('int1e_ovlp')) * .25
-        h2 = lib.einsum('xy,zzuv->xyuv', numpy.eye(3), h2) - h2
-
-        # .5i (\mu|g Rx\nabla|\nu) - .5i (\mu|g rx\nabla|\nu) + transpose(x,y)
-        LC = lib.LeviCivita
-        ruv = r_nuc - r_nuc[:,None,:]
-        h2g = mol.intor('int1e_irp', comp=9).reshape(3,3,nao,nao) * .25
-        h2g = lib.einsum('xij,uvi,ykl,vk,jluv->xyuv', LC, ruv, LC, r_nuc, h2g)
-        h2g -= mol.intor('int1e_grjxp', comp=9).reshape(3,3,nao,nao) * .5
-        h2g += h2g.transpose(1,0,2,3)
-
-        # (\mu|gg kin|\nu) + (\mu|gg nuc|\nu)
-        h2gg  = mol.intor_symmetric('int1e_ggkin', comp=9)
+        h2gg  = mol.intor('int1e_ggkin', comp=9)
         h2gg += mol.intor_symmetric('int1e_ggnuc', comp=9)
 
-        h2 = h2 + h2g + h2gg.reshape(3,3,nao,nao)
+        h2g  = mol.intor('int1e_grjxp', comp=9).reshape(3,3,nao,nao) * .5
+        h2g += h2g.transpose(1,0,2,3)
+
+        h2 = mol.intor('int1e_rr_origj', comp=9).reshape(3,3,nao,nao) * .25
+        h2 = lib.einsum('xy,zzuv->xyuv', numpy.eye(3), h2) - h2
+
+        h2 = h2gg.reshape(3,3,nao,nao) + h2g + h2
     else:
         mol.set_common_origin(gauge_orig)
         h2 = mol.intor_symmetric('int1e_rr', comp=9).reshape(3,3,nao,nao) * .25
+        h2 = lib.einsum('xy,zzuv->xyuv', numpy.eye(3), h2) - h2
     return h2
 
 def get_jk2(mol, dm0):
-    r'''Second-order JK wrt the external magnetic field.
+    r'''The second-order JK wrt the external magnetic field.
         J_{\mu\nu}^(2) = D_{\lambda\kappa}^0 (gg\mu\nu|\kappa\lambda) * 2
-                        +D_{\lambda\kappa}^0 (g\mu\nu|g\kappa\lambda) * 2
-        K_{\mu\nu}^(2) = D_{\nu\kappa}^0 (gg\mu\nu|\kappa\lambda) * 2
-                        +D_{\nu\kappa}^0 (g\mu\nu|g\kappa\lambda) * 2
+                       + D_{\lambda\kappa}^0 (g\mu\nu|g\kappa\lambda) * 2
+        K_{\mu\nu}^(2) = D_{\lambda\kappa}^0 (gg\mu\lambda|\kappa\nu) * 2
+                       + D_{\lambda\kappa}^0 (g\mu\lambda|g\kappa\nu) * 2
         JK^(2) = J^(2) - .5*K^(2)'''
-    # J_g1g2 does not contribute because of anti-symmetry
     j2  = jk.get_jk(mol, dm0, 'ijkl,lk->s2ij', 'int2e_gg1' , 's4' , comp=9, hermi=1)
-   #j2 += jk.get_jk(mol, dm0, 'ijkl,lk->a2ij', 'int2e_g1g2', 'aa4', comp=9, hermi=2)
+    j2 += jk.get_jk(mol, dm0, 'ijkl,lk->s2ij', 'int2e_g1g2', 'aa4', comp=9, hermi=1)
     k2  = jk.get_jk(mol, dm0, 'ijkl,jk->s1il', 'int2e_gg1' , 's4' , comp=9, hermi=0)
     k2 += jk.get_jk(mol, dm0, 'ijkl,jk->s1il', 'int2e_g1g2', 'aa4', comp=9, hermi=0)
     jk2 = j2 * 2 - k2
-    return jk2.reshape(3,3,*jk2.shape[1:])
+    return jk2.reshape(3,3,*jk2.shape[-2:])
 
 def get_s2(mol):
-    '''Second-order overlap matrix wrt the external magnetic field.'''
+    r'''The second-order overlap matrix wrt the external magnetic field.
+        S_{\mu\nu}^(2) = (\mu|gg|\nu)'''
     nao = mol.nao
     return mol.intor_symmetric('int1e_ggovlp', comp=9).reshape(3,3,nao,nao)
 
@@ -190,22 +190,9 @@ def _get_ao_coords(mol):
 
 class Magnetizability(CPHFBase):
     def __init__(self, mf):
-        mol = mf.mol
-        self.mol = mol
-        self.verbose = mol.verbose
-        self.stdout = mol.stdout
-        self.chkfile = mf.chkfile
-        self.mf = mf
-
+        super().__init__(mf)
         self._gauge_orig = None
         self.with_s1 = True
-        self.cphf = True
-        self.max_cycle_cphf = 20
-        self.conv_tol = 1e-9
-
-        self.mo10 = None
-        self.mo_e10 = None
-        self._keys = set(self.__dict__.keys())
 
     @property
     def gauge_orig(self):
@@ -255,33 +242,9 @@ class Magnetizability(CPHFBase):
             unit = nist.HARTREE2J / nist.AU2TESLA**2 * 1e30
             _write(self.stdout, ksi*unit, '\nMagnetizability (10^{-30} J/T^2)')
         return ksi
-    
-    def get_mo1(self, freq=0, picture_change=True, solver='krylov'):
-        '''
-        Generate the transformation matrix U(0) or (U(+\omega), U(-\omega)),
-        which is the coefficient matrix of the 1st-order derivative of MO.
-        '''
-        mol = self.mol
-        mf = self.mf
-        e0 = mf.mo_energy[mf.mo_occ>0]
-        rhs = -self.get_h1vo(picture_change)
-        rhs -= self._to_vo(self.get_jk1(mol, mf.make_rdm1()))
-        rhs += self._to_vo(self.get_s1(mol))*e0
-        solver = solver.lower()
-        if   'direct' in solver: # exact solver
-            mo1 = super().direct_solver(rhs, freq, with_s1=True)
-        elif 'newton' in solver: # only newton-krylov recommended
-            mo1 = super().newton_solver(-rhs, freq, with_s1=True)
-        elif 'krylov' in solver: # very recommended
-            mo1 = super().krylov_solver(rhs, freq, with_s1=True)
-        else:
-            raise NotImplementedError(solver)
-        mo1oo = self.get_s1oo(mf.mol) * -.5
-        mo1 = numpy.concatenate((mo1oo, mo1), axis=-2)
-        return mo1
 
     def get_e0to(self):
-        '''Generate e0to = e0t - e0o.'''
+        '''e0to = e0t - e0o.'''
         mf = self.mf
         mo_energy = mf.mo_energy
         e0o = mo_energy[mf.mo_occ>0]
@@ -293,22 +256,19 @@ class Magnetizability(CPHFBase):
     para = paramag = paramag
     get_fock = rhf_nmr.get_fock
 
-    def get_h1(self, picture_change=True):
+    def get_h1(self, **kwargs):
         mol = self.mol
-        return get_h1(mol, picture_change=picture_change)
+        gauge_orig = self.gauge_orig
+        return get_h1(mol, gauge_orig, **kwargs)
     
-    def get_jk1(self, mol, dm0):
-        if mol is None: mol = self.mol
+    def get_jk1(self, dm0=None):
+        mol = self.mol
         if dm0 is None: dm0 = self.mf.make_rdm1()
         return get_jk1(mol, dm0)
     
-    def get_s1(self, mol):
-        if mol is None: mol = self.mol
+    def get_s1(self):
+        mol = self.mol
         return get_s1(mol)
-    
-    def get_s1oo(self, mol):
-        if mol is None: mol = self.mol
-        return self._to_oo(self.get_s1(mol))
 
 
 if __name__ == '__main__':

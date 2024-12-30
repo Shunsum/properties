@@ -1,8 +1,8 @@
 import numpy
-from itertools import product
 from scipy.optimize import newton_krylov
 from pyscf import lib
 from pyscf.lib import logger
+from pyscf.scf import hf, _response_functions
 from pyscf.x2c.x2c import X2C1E_GSCF
 
 class CPHFBase(lib.StreamObject):
@@ -19,6 +19,130 @@ class CPHFBase(lib.StreamObject):
         self.conv_tol = 1e-9
 
         self._keys = set(self.__dict__.keys())
+
+    def get_dm1(self, mo1=None, freq=0, **kwargs):
+        '''The first-order density matrix in AO basis.'''
+        if mo1 is None:
+            try: mo1 = self.mo1[freq]
+            except KeyError: mo1 = self.solve_mo1(freq=freq, **kwargs)
+        mf = self.mf
+        mo_coeff = mf.mo_coeff
+        occidx = mf.mo_occ > 0
+        orbv = mo_coeff[:,~occidx]
+        orbo = mo_coeff[:, occidx]
+        
+        if freq == 0 and len(mo1) != 2:
+            if mo1.shape[-2] == orbv.shape[-1]:
+                dm1 = lib.einsum('pj,xji,qi->xpq', orbv, mo1, orbo.conj())
+            elif mo1.shape[-2] == orbo.shape[-1]: # mo1 = s1oo * -.5
+                dm1 = lib.einsum('pj,xji,qi->xpq', orbo, mo1, orbo.conj())
+            else: # mo1.shape[-2] == mo_coeff.shape[-1]
+                dm1 = lib.einsum('pj,xji,qi->xpq', mo_coeff, mo1, orbo.conj())
+            dm1 += dm1.transpose(0,2,1).conj()
+        
+        else: # mo1[0] = U(w), mo1[1] = U*(-w)
+            if mo1.shape[-2] == orbv.shape[-1]:
+                dm1 = lib.einsum('pj,xji,qi->xpq', orbv, mo1[0], orbo.conj())
+                dm1+= lib.einsum('pi,xji,qj->xpq', orbo, mo1[1], orbv.conj())
+            elif mo1.shape[-2] == orbo.shape[-1]: # mo1 = s1oo * -.5
+                dm1 = lib.einsum('pj,xji,qi->xpq', orbo, mo1, orbo.conj())
+                dm1+= dm1.transpose(0,2,1).conj()
+            else: # mo1.shape[-2] == mo_coeff.shape[-1]
+                dm1 = lib.einsum('pj,xji,qi->xpq', mo_coeff, mo1[0], orbo.conj())
+                dm1+= lib.einsum('pi,xji,qj->xpq', orbo, mo1[1], mo_coeff.conj())
+        
+        return dm1*2 if isinstance(mf, hf.RHF) else dm1
+
+    def get_dm2(self, mo2=None, freq=(0,0), with_mo1=True, with_mo2=True, **kwargs):
+        '''The second-order density matrix in AO basis.'''
+        if mo2 is None and with_mo2:
+            try: mo2 = self.mo2[freq]
+            except KeyError: mo2 = self.solve_mo2(freq=freq, **kwargs)
+        mf = self.mf
+        mo_coeff = mf.mo_coeff
+        occidx = mf.mo_occ > 0
+        orbv = mo_coeff[:,~occidx]
+        orbo = mo_coeff[:, occidx]
+        dm22 = dm21 = 0
+
+        if freq == (0,0) and (mo2 is None or len(mo2) != 2): # D(0,0)
+            if with_mo2:
+                if mo2.shape[-2] == orbv.shape[-1]:
+                    dm22 = lib.einsum('pj,xyji,qi->xypq', orbv, mo2, orbo.conj())
+                elif mo2.shape[-2] == orbo.shape[-1]:
+                    dm22 = lib.einsum('pj,xyji,qi->xypq', orbo, mo2, orbo.conj())
+                else:
+                    dm22 = lib.einsum('pj,xyji,qi->xypq', mo_coeff, mo2, orbo.conj())
+            if with_mo1:
+                try: mo1 = self.mo1[0]
+                except KeyError: mo1 = self.solve_mo1(freq=0, **kwargs)
+                if self.with_s1: # mo1.shape = (3,ntot,nocc)
+                    dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo1, mo1.conj(),
+                                                             mo_coeff.conj())
+                else:            # mo1.shape = (3,nvir,nocc)
+                    dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo1, mo1.conj(),
+                                                             orbv.conj())
+            dm2 = dm22 + dm21
+            try: dm2 += dm2.transpose(0,1,3,2).conj()
+            except SyntaxError: pass
+        
+        else: # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
+            if with_mo2:
+                if mo2.shape[-2] == orbv.shape[-1]:
+                    dm22 = lib.einsum('pj,xyji,qi->xypq', orbv, mo2[0], orbo.conj())
+                    dm22+= lib.einsum('pi,xyji,qj->xypq', orbo, mo2[1], orbv.conj())
+                elif mo2.shape[-2] == orbo.shape[-1]:
+                    dm22 = lib.einsum('pj,xyji,qi->xypq', orbo, mo2[0], orbo.conj())
+                    dm22+= lib.einsum('pi,xyji,qj->xypq', orbo, mo2[1], orbo.conj())
+                else:
+                    dm22 = lib.einsum('pj,xyji,qi->xypq', mo_coeff, mo2[0], orbo.conj())
+                    dm22+= lib.einsum('pi,xyji,qj->xypq', orbo, mo2[1], mo_coeff.conj())
+            if with_mo1:
+                if freq[1] == freq[0]: # D(w,w)
+                    try: mo1 = self.mo1[freq[0]]
+                    except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
+                    if self.with_s1:
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo1[0], mo1[1],
+                                                                 mo_coeff.conj())
+                    else:
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo1[0], mo1[1],
+                                                                 orbv.conj())
+                    dm21 += dm21.transpose(1,0,2,3)
+                elif freq[1] == -freq[0]: # D(w,-w)
+                    try: mo1 = self.mo1[freq[0]]
+                    except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
+                    if self.with_s1:
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo1[0], mo1[0].conj(),
+                                                                 mo_coeff.conj())
+                        dm21+= lib.einsum('pj,xki,yji,qk->xypq', mo_coeff, mo1[1], mo1[1].conj(),
+                                                                 mo_coeff.conj())
+                    else:
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo1[0], mo1[0].conj(),
+                                                                 orbv.conj())
+                        dm21+= lib.einsum('pj,xki,yji,qk->xypq', orbv, mo1[1], mo1[1].conj(),
+                                                                 orbv.conj())
+                elif 0 in freq: # D(w,0) / D(0,w)
+                    w = freq[0] if freq[0] != 0 else freq[1]
+                    try: mo10 = self.mo1[0]
+                    except KeyError: mo10 = self.solve_mo1(freq=0, **kwargs)
+                    try: mo11 = self.mo1[w]
+                    except KeyError: mo11 = self.solve_mo1(freq=w, **kwargs)
+                    if self.with_s1:
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo11[0], mo10.conj(),
+                                                                 mo_coeff.conj())
+                        dm21+= lib.einsum('pk,xji,yki,qj->xypq', mo_coeff, mo11[1], mo10,
+                                                                 mo_coeff.conj())
+                    else:
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo11[0], mo10.conj(),
+                                                                 orbv.conj())
+                        dm21+= lib.einsum('pk,xji,yki,qj->xypq', orbv, mo11[1], mo10,
+                                                                 orbv.conj())
+                    if freq.index(0) == 0: dm21 = dm21.transpose(1,0,2,3)
+                else:
+                    raise ValueError(f'Invalid frequencies `{freq}`.')
+            dm2 = dm22 + dm21
+        
+        return dm2*2 if isinstance(mf, hf.RHF) else dm2
 
     def get_vind(self, mo_deriv, freq, **kwargs):
         '''The induced potential matrix in AO basis.'''
@@ -65,7 +189,7 @@ class CPHFBase(lib.StreamObject):
             e1 = self._to_oo(e1)
             mf = self.mf
             e0 = mf.mo_energy[mf.mo_occ>0]
-            e0oo = (e0[:,None] + e0 + freq) * .5
+            e0oo = (e0[:,None] - e0 + freq) * .5
             e1 -= self._to_oo(self.get_s1()) * e0oo
             return e1
         else:
@@ -118,24 +242,118 @@ class CPHFBase(lib.StreamObject):
         e0vo = e0v[:,None] - e0o
         return e0vo
 
-    def _rhs1(self, freq, **kwargs):
+    def solve_mo1(self, freq=0, solver='krylov', **kwargs):
+        '''CP-HF/KS solver for the first-order MO response $U$.'''
+        assert isinstance(freq, (int, float))
+        solver = solver.lower()
+        if   'direct' in solver: # exact solver
+            mo1 = self._direct_solver(freq, **kwargs)
+        elif 'newton' in solver: # only newton-krylov recommended
+            mo1 = self._newton_solver(freq, **kwargs)
+        elif 'krylov' in solver: # very recommended
+            mo1 = self._krylov_solver(freq, **kwargs)
+        else:
+            raise NotImplementedError(solver)
+        self.mo1[freq] = mo1
+        return mo1
+    
+    def solve_mo2(self, freq=(0,0), solver='krylov', **kwargs):
+        '''CP-HF/KS solver for the second-order MO response $U$.'''
+        assert isinstance(freq, tuple) and len(freq) == 2
+        solver = solver.lower()
+        if   'direct' in solver: # exact solver
+            mo2 = self._direct_solver(freq, **kwargs)
+        elif 'newton' in solver: # only newton-krylov recommended
+            mo2 = self._newton_solver(freq, **kwargs)
+        elif 'krylov' in solver: # very recommended
+            mo2 = self._krylov_solver(freq, **kwargs)
+        else:
+            raise NotImplementedError(solver)
+        self.mo2[freq] = mo2
+        return mo2
+
+    def _mo2oo(self, freq=(0,0), **kwargs):
+        '''The second-order MO response $U$ in the occ.-occ. block.'''
+        if freq == (0,0): # U(0,0)
+            try: mo1 = self.mo1[0]
+            except KeyError: mo1 = self.solve_mo1(freq=0, **kwargs)
+            mo2oo = lib.einsum('xji,yjk->xyik', mo1.conj(), mo1)
+            if self.with_s1:
+                s2 = self._to_oo(self.get_s2())
+                s1 = self._to_to(self.get_s1())
+                us = lib.einsum('xji,yjk->xyik', mo1.conj(), s1)
+                us+= us.transpose(0,1,3,2).conj()
+                mo2oo += us + s2*.5
+            mo2oo += mo2oo.transpose(1,0,2,3)
+            mo2oo *= -.5
+        else:
+            if freq[1] == freq[0]: # U(w,w)
+                try: mo1 = self.mo1[freq[0]]
+                except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
+                mo2oo = lib.einsum('xji,yjk->xyik', mo1[1], mo1[0])
+                if self.with_s1:
+                    s2 = self._to_oo(self.get_s2())
+                    s1 = self._to_to(self.get_s1())
+                    us = lib.einsum('xji,yjk->xyik', mo1[1], s1)
+                    us+= lib.einsum('xjk,yji->xyik', mo1[0], s1.conj())
+                    mo2oo += us + s2*.5
+                mo2oo += mo2oo.transpose(1,0,2,3)
+            elif freq[1] == -freq[0]: # U(w,-w)
+                try: mo1 = self.mo1[freq[0]]
+                except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
+                mo2oo = lib.einsum('xji,yjk->xyik', mo1[1], mo1[0])
+                mo2oo+= lib.einsum('xjk,yji->xyik', mo1[0], mo1[1])
+                if self.with_s1:
+                    s2 = self._to_oo(self.get_s2())
+                    s1 = self._to_to(self.get_s1())
+                    us = lib.einsum('xji,yjk->xyik', mo1[1], s1)
+                    us+= lib.einsum('xjk,yji->xyik', mo1[0], s1.conj())
+                    us+= us.transpose(1,0,3,2).conj()
+                    mo2oo += us + s2
+            elif 0 in freq: # U(w,0) / U(0,w)
+                w = freq[0] if freq[0] != 0 else freq[1]
+                try: mo10 = self.mo1[0]
+                except KeyError: mo10 = self.solve_mo1(freq=0, **kwargs)
+                try: mo11 = self.mo1[w]
+                except KeyError: mo11 = self.solve_mo1(freq=w, **kwargs)
+                mo2oo = lib.einsum('xji,yjk->xyik', mo11[1], mo10)
+                mo2oo+= lib.einsum('xjk,yji->xyik', mo11[0], mo10.conj())
+                if self.with_s1:
+                    s2 = self._to_oo(self.get_s2())
+                    s1 = self._to_to(self.get_s1())
+                    us = lib.einsum('xji,yjk->xyik', mo11[1], s1)
+                    us+= lib.einsum('xjk,yji->xyik', mo11[0], s1.conj())
+                    us+= lib.einsum('yji,xjk->xyik', mo10, s1)
+                    us+= lib.einsum('yjk,xji->xyik', mo10, s1.conj())
+                    mo2oo += us + s2
+                if freq.index(0) == 0: mo2oo = mo2oo.transpose(1,0,2,3)
+            else:
+                raise ValueError(f'Invalid frequencies `{freq}`.')
+            mo2oo = numpy.stack((mo2oo, mo2oo.transpose(0,1,3,2))) * -.5
+        return mo2oo
+
+    def _rhs1(self, freq=0, **kwargs):
         '''The right-hand side of the working first-order CP-HF/KS equation.'''
         rhs = -self.get_h1(**kwargs)
         if self.with_s1:
             mf = self.mf
             e0 = mf.mo_energy[mf.mo_occ>0]
-            rhs -= self.get_jk1(mf.mol, mf.make_rdm1())
+            s1 = self.get_s1()
+            rhs += self.get_vind(self._to_oo(s1)*.5, freq, **kwargs)
+            rhs -= self.get_jk1(mf.make_rdm1())
             if freq != 0:
                 rhs += self.get_t1(freq) * 1j
-            rhs = self._to_vo(rhs)
-            rhs+= self._to_vo(self.get_s1()) * e0
+            rhs  = self._to_vo(rhs)
+            rhs += self._to_vo(s1) * e0
             return rhs
         else:
             return self._to_vo(rhs)
 
-    def _rhs2(self, freq, **kwargs):
+    def _rhs2(self, freq=(0,0), **kwargs):
         '''The right-hand side of the working second-order CP-HF/KS equation.'''
-        rhs = -self._to_vo(self.get_f2(freq=freq, with_mo2=False, **kwargs))
+        rhs = -self.get_f2(freq=freq, with_mo2=False, **kwargs)
+        rhs -= self.get_vind(self._mo2oo(freq, **kwargs), freq, **kwargs)
+        rhs = self._to_vo(rhs)
 
         if freq[1] == freq[0]:
             try: mo1 = self.mo1[freq[0]]
@@ -250,7 +468,7 @@ class CPHFBase(lib.StreamObject):
         return rhs
 
     def _krylov_solver(self, freq=0, verbose=logger.WARN, **kwargs):
-        '''CP-HF/KS iterative solver by `pyscf.lib.krylov`.'''
+        '''CP-HF/KS subspace projection solver by `pyscf.lib.krylov`.'''
         log = logger.new_logger(verbose=verbose)
         t0 = (logger.process_clock(), logger.perf_counter())
         e0vo = self.get_e0vo()
@@ -260,30 +478,22 @@ class CPHFBase(lib.StreamObject):
             rhs = self._rhs1(freq, **kwargs)
             
             if freq == 0:
-                if self.with_s1:
-                    mo1oo = self._to_oo(self.get_s1()) * -.5
-                def lhs(mo1):
+                def lhs(mo1): # U(0)
                     mo1 = mo1.reshape(3,nvir,nocc)
-                    if self.with_s1:
-                        mo1 = numpy.concatenate((mo1oo, mo1), axis=-2)
-                    v1 = self._to_vo(self.get_vind(mo1, freq)) / e0vo
+                    v1 = self._to_vo(self.get_vind(mo1, freq, **kwargs)) / e0vo
                     return v1.ravel()
                 # accurate enough
-                mo1base = rhs / e0vo
-                mo1 = lib.krylov(lhs, mo1base.ravel(), max_cycle=self.max_cycle,
+                rhs /= e0vo
+                mo1 = lib.krylov(lhs, rhs.ravel(), max_cycle=self.max_cycle,
                                  tol=self.conv_tol, verbose=log).reshape(3,nvir,nocc)
                 if self.with_s1:
+                    mo1oo = self._to_oo(self.get_s1()) * -.5
                     mo1 = numpy.concatenate((mo1oo, mo1), axis=-2)
             
             else:
-                if self.with_s1:
-                    mo1oo = self._to_oo(self.get_s1()) * -.5
-                    mo1oo = numpy.stack((mo1oo, mo1oo.transpose(0,2,1)))
-                def lhs(mo1,i): # mo1[0]=U(w), mo1[1]=U*(-w)
+                def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
                     mo1 = mo1.reshape(2,-1,nvir,nocc)
-                    if self.with_s1:
-                        mo1 = numpy.concatenate((mo1oo[:,i,None], mo1), axis=-2)
-                    v1 = self.get_vind(mo1, freq)
+                    v1 = self.get_vind(mo1, freq, **kwargs)
                     v1_p = self._to_vo(v1) # shape: (1,nvir,nocc)
                     v1_m = self._to_vo(v1.transpose(0,2,1).conj())
                     v1_p /= (e0vo + freq)
@@ -291,14 +501,16 @@ class CPHFBase(lib.StreamObject):
                     v1 = numpy.stack((v1_p, v1_m.conj()))
                     return v1.ravel()
                 # calculating each direction separately can give a more exact result
-                mo1base = numpy.stack((rhs       /(e0vo+freq),
-                                       rhs.conj()/(e0vo-freq))) # shape: (2,3,nvir,nocc)
-                mo1 = numpy.empty_like(mo1base)
+                rhs = numpy.stack((rhs       /(e0vo+freq),
+                                   rhs.conj()/(e0vo-freq))) # shape: (2,3,nvir,nocc)
+                mo1 = numpy.empty_like(rhs)
                 for i in range(3):
-                    mo1[:,i] = lib.krylov(lambda mo1: lhs(mo1,i), mo1base[:,i].ravel(),
-                                          max_cycle=self.max_cycle, tol=self.conv_tol,
-                                          verbose=log).reshape(2,nvir,nocc)
+                    mo1[:,i] = lib.krylov(lhs, rhs[:,i].ravel(), max_cycle=self.max_cycle,
+                                          tol=self.conv_tol, verbose=log).reshape(2,nvir,nocc)
                 if self.with_s1:
+                    mo1oo = self._to_oo(self.get_s1()) * -.5
+                    mo1oo = numpy.stack((mo1oo, mo1oo.transpose(0,2,1)))
+                    # transpose() is more efficient than conj() for a hermitian matrix
                     mo1 = numpy.concatenate((mo1oo, mo1), axis=-2)
                 
             log.timer('Krylov solver for the first-order CP-HF/KS', *t0)
@@ -308,165 +520,174 @@ class CPHFBase(lib.StreamObject):
             assert isinstance(freq, tuple)
             rhs = self._rhs2(freq, **kwargs)
             
-            if freq == (0,0): # U(0,0)
-                try: mo1 = self.mo1[0]
-                except KeyError: mo1 = self.solve_mo1(freq=0, **kwargs)
-                mo2oo = lib.einsum('xji,yjk->xyik', mo1.conj(), mo1)
-                if self.with_s1:
-                    s2 = self._to_oo(self.get_s2())
-                    s1 = self._to_to(self.get_s1())
-                    us = lib.einsum('xji,yjk->xyik', mo1.conj(), s1)
-                    us+= us.transpose(0,1,3,2).conj()
-                    mo2oo += us + s2*.5
-                mo2oo += mo2oo.transpose(1,0,2,3)
-                mo2oo *= -.5
-                
-                def lhs(mo2):
-                    mo2 = mo2.reshape(3,3,nvir,nocc)
-                    mo2 = numpy.concatenate((mo2oo, mo2), axis=-2) # shape: (3,3,ntot,nocc)
-                    v2 = self._to_vo(self.get_vind(mo2, freq, with_mo1=False)) / e0vo
+            if freq == (0,0):
+                def lhs(mo2): # U(0,0)
+                    mo2 = mo2.reshape(1,1,nvir,nocc)
+                    v2 = self._to_vo(self.get_vind(mo2, freq, with_mo1=False, **kwargs)) / e0vo
                     return v2.ravel()
-                # TODO: Test accuracy
-                mo2base = rhs / e0vo
-                mo2 = lib.krylov(lhs, mo2base.ravel(), max_cycle=self.max_cycle,
-                                 tol=self.conv_tol, verbose=log).reshape(3,3,nvir,nocc)
-                mo2 = numpy.concatenate((mo2oo, mo2), axis=-2)
+                # Combined calculations can be efficient, but solving each direction individually
+                # yields results very closely aligned with those obtained from the direct solver.
+                rhs /= e0vo
+                mo2 = numpy.empty_like(rhs)
+                for i, j in numpy.ndindex(3,3):
+                    mo2[i,j] = lib.krylov(lhs, rhs[i,j].ravel(), max_cycle=self.max_cycle,
+                                          tol=self.conv_tol, verbose=log).reshape(nvir,nocc)
                 
             else:
-                if freq[1] == freq[0]: # U(w,w)
-                    try: mo1 = self.mo1[freq[0]]
-                    except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
-                    mo2oo = lib.einsum('xji,yjk->xyik', mo1[1], mo1[0])
-                    if self.with_s1:
-                        s2 = self._to_oo(self.get_s2())
-                        s1 = self._to_to(self.get_s1())
-                        us = lib.einsum('xji,yjk->xyik', mo1[1], s1)
-                        us+= lib.einsum('xjk,yji->xyik', mo1[0], s1.conj())
-                        mo2oo += us + s2*.5
-                    mo2oo += mo2oo.transpose(1,0,2,3)
-                elif freq[1] == -freq[0]: # U(w,-w)
-                    try: mo1 = self.mo1[freq[0]]
-                    except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
-                    mo2oo = lib.einsum('xji,yjk->xyik', mo1[1], mo1[0])
-                    mo2oo+= lib.einsum('xjk,yji->xyik', mo1[0], mo1[1])
-                    if self.with_s1:
-                        s2 = self._to_oo(self.get_s2())
-                        s1 = self._to_to(self.get_s1())
-                        us = lib.einsum('xji,yjk->xyik', mo1[1], s1)
-                        us+= lib.einsum('xjk,yji->xyik', mo1[0], s1.conj())
-                        us+= us.transpose(1,0,3,2).conj()
-                        mo2oo += us + s2
-                elif 0 in freq: # U(w,0) / U(0,w)
-                    w = freq[0] if freq[0] != 0 else freq[1]
-                    try: mo10 = self.mo1[0]
-                    except KeyError: mo10 = self.solve_mo1(freq=0, **kwargs)
-                    try: mo11 = self.mo1[w]
-                    except KeyError: mo11 = self.solve_mo1(freq=w, **kwargs)
-                    mo2oo = lib.einsum('xji,yjk->xyik', mo11[1], mo10)
-                    mo2oo+= lib.einsum('xjk,yji->xyik', mo11[0], mo10.conj())
-                    if self.with_s1:
-                        s2 = self._to_oo(self.get_s2())
-                        s1 = self._to_to(self.get_s1())
-                        us = lib.einsum('xji,yjk->xyik', mo11[1], s1)
-                        us+= lib.einsum('xjk,yji->xyik', mo11[0], s1.conj())
-                        us+= lib.einsum('yji,xjk->xyik', mo10, s1)
-                        us+= lib.einsum('yjk,xji->xyik', mo10, s1.conj())
-                        mo2oo += us + s2
-                    if freq.index(0) == 0: mo2oo = mo2oo.transpose(1,0,2,3)
-                else:
-                    raise ValueError(f'Invalid frequencies `{freq}`.')
-                mo2oo = numpy.stack((mo2oo, mo2oo.transpose(0,1,3,2))) * -.5
-
-                def lhs(mo2,i,j): # mo2[0]=U(w1,w2), mo2[1]=U*(-w1,-w2)
+                def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
                     mo2 = mo2.reshape(2,1,1,nvir,nocc)
-                    mo2 = numpy.concatenate((mo2oo[:,i,j,None,None], mo2), axis=-2)
-                    v1 = self.get_vind(mo2, freq, with_mo1=False)
-                    v1_p = self._to_vo(v1)
-                    v1_m = self._to_vo(v1.transpose(0,1,3,2).conj())
-                    v1_p /= (e0vo + freq[0] + freq[1])
-                    v1_m /= (e0vo - freq[0] - freq[1])
-                    v1 = numpy.stack((v1_p, v1_m.conj()))
-                    return v1.ravel()
+                    v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
+                    v2_p = self._to_vo(v2)
+                    v2_m = self._to_vo(v2.transpose(0,1,3,2).conj())
+                    v2_p /= (e0vo + freq[0] + freq[1])
+                    v2_m /= (e0vo - freq[0] - freq[1])
+                    v2 = numpy.stack((v2_p, v2_m.conj()))
+                    return v2.ravel()
                 # calculating each direction separately can give a more exact result
-                mo2base = numpy.stack((rhs       /(e0vo+freq[0]+freq[1]),
-                                       rhs.conj()/(e0vo-freq[0]-freq[1])))
-                mo2 = numpy.empty_like(mo2base) # shape: (2,3,3,nvir,nocc)
-                for i, j in product(range(3), repeat=2):
-                    mo2[:,i,j] = lib.krylov(lambda mo2: lhs(mo2,i,j), mo2base[:,i,j].ravel(),
-                                            max_cycle=self.max_cycle, tol=self.conv_tol,
-                                            verbose=log).reshape(2,nvir,nocc)
-                mo2 = numpy.concatenate((mo2oo, mo2), axis=-2)
-                
+                rhs = numpy.stack((rhs       /(e0vo+freq[0]+freq[1]),
+                                   rhs.conj()/(e0vo-freq[0]-freq[1])))
+                mo2 = numpy.empty_like(rhs) # shape: (2,3,3,nvir,nocc)
+                for i, j in numpy.ndindex(3,3):
+                    mo2[:,i,j] = lib.krylov(lhs, rhs[:,i,j].ravel(), max_cycle=self.max_cycle,
+                                            tol=self.conv_tol, verbose=log).reshape(2,nvir,nocc)
+            
+            mo2 = numpy.concatenate((self._mo2oo(freq, **kwargs), mo2), axis=-2)
             log.timer('Krylov solver for the second-order CPHF/KS', *t0)
             return mo2
         
         else:
             raise NotImplementedError(freq)
 
-    def _newton_solver(self, lhs, freq=0, with_s1=False, verbose=logger.WARN):
-        '''1st-order CPHF/KS iterative solver by `scipy.optimize.newton_krylov`.'''
+    def _newton_solver(self, freq=0, verbose=logger.WARN, **kwargs):
+        '''CP-HF/KS iterative solver by `scipy.optimize.newton_krylov`.'''
         log = logger.new_logger(verbose=verbose)
         t0 = (logger.process_clock(), logger.perf_counter())
 
         e0vo = self.get_e0vo()
-        
-        if freq == 0:
-            def vind(mo1):
-                v1  = self.get_vindvo(mo1, with_s1)
-                v1 += e0vo * mo1
-                return v1 + lhs
+        # first-order solver
+        if isinstance(freq, (int, float)):
+            rhs = self._rhs1(freq, **kwargs)
 
+            if freq == 0:
+                def lhs(mo1): # U(0)
+                    v1 = self._to_vo(self.get_vind(mo1, freq, **kwargs))
+                    v1 += e0vo * mo1
+                    return v1 - rhs
+
+            else:
+                rhs = numpy.stack((rhs, rhs.conj()))
+                def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
+                    v1 = self.get_vind(mo1, freq, **kwargs)
+                    v1_p = self._to_vo(v1)
+                    v1_m = self._to_vo(v1.transpose(0,2,1).conj())
+                    v1_p += (e0vo + freq) * mo1[0]
+                    v1_m += (e0vo - freq) * mo1[1].conj()
+                    v1 = numpy.stack((v1_p, v1_m.conj()))
+                    return v1 - rhs
+
+            mo1 = newton_krylov(lhs, rhs, maxiter=self.max_cycle, f_tol=self.conv_tol)
+            if self.with_s1:
+                mo1oo = self._to_oo(self.get_s1()) * -.5
+                if freq != 0:
+                    mo1oo = numpy.stack((mo1oo, mo1oo.transpose(0,2,1)))
+                mo1 = numpy.concatenate((mo1oo, mo1), axis=-2)
+        
+            log.timer('Newton-Krylov solver for the first-order CP-HF/KS', *t0)
+            return mo1
+        # second-order solver
+        elif len(freq) == 2:
+            rhs = self._rhs2(freq, **kwargs)
+
+            if freq == (0,0):
+                def lhs(mo2): # U(0,0)
+                    v2 = self._to_vo(self.get_vind(mo2, freq, with_mo1=False, **kwargs))
+                    v2 += e0vo * mo2
+                    return v2 - rhs
+                
+            else:
+                rhs = numpy.stack((rhs, rhs.conj()))
+                def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
+                    v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
+                    v2_p = self._to_vo(v2)
+                    v2_m = self._to_vo(v2.transpose(0,1,3,2).conj())
+                    v2_p += (e0vo + freq[0] + freq[1]) * mo2[0]
+                    v2_m += (e0vo - freq[0] - freq[1]) * mo2[1].conj()
+                    v2 = numpy.stack((v2_p, v2_m.conj()))
+                    return v2 - rhs
+
+            mo2 = newton_krylov(lhs, rhs, maxiter=self.max_cycle, f_tol=self.conv_tol)
+            mo2 = numpy.concatenate((self._mo2oo(freq, **kwargs), mo2), axis=-2)
+
+            log.timer('Newton-Krylov solver for the second-order CP-HF/KS', *t0)
+            return mo2
+        
         else:
-            lhs = numpy.stack((lhs, lhs))
-            def vind(mo1):
-                v1 = self.get_vind(mo1, with_s1)
-                v1_p = self._to_vo(v1)
-                v1_m = self._to_vo(v1.transpose(0,2,1).conj())
-                v1_p += (e0vo + freq) * mo1[0]
-                v1_m += (e0vo - freq) * mo1[1]
-                v1 = numpy.stack((v1_p, v1_m))
-                return v1 + lhs
+            raise NotImplementedError(freq)
 
-        mo1 = newton_krylov(vind, -lhs, maxiter=self.max_cycle,
-                            f_tol=self.conv_tol)
-        
-        log.timer('Newton-Krylov solver in CPHF/KS', *t0)
-        return mo1
-
-    def _direct_solver(self, rhs, freq=0, with_s1=False, verbose=logger.WARN):
-        '''1st-order CPHF/KS direct solver by `numpy.linalg.solve`.'''
+    def _direct_solver(self, freq=0, verbose=logger.WARN, **kwargs):
+        '''CP-HF/KS direct solver by `numpy.linalg.solve`.'''
         log = logger.new_logger(verbose=verbose)
         t0 = (logger.process_clock(), logger.perf_counter())
 
         e0vo = self.get_e0vo()
         nvir, nocc = e0vo.shape
-        rhs = numpy.stack((rhs, rhs.conj()), axis=1)
+        # first-order solver
+        if isinstance(freq, (int, float)):
+            rhs = self._rhs1(freq, **kwargs)
+            
+            def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
+                mo1 = mo1.reshape(2,1,nvir,nocc)
+                v1 = self.get_vind(mo1, freq, **kwargs)
+                v1_p = self._to_vo(v1)
+                v1_m = self._to_vo(v1.transpose(0,2,1).conj())
+                v1_p += (e0vo + freq) * mo1[0]
+                v1_m += (e0vo - freq) * mo1[1].conj()
+                v1 = numpy.stack((v1_p, v1_m.conj())) # shape: (2,1,nvir,nocc)
+                return v1.ravel()
+        # second-order solver
+        elif len(freq) == 2:
+            rhs = self._rhs2(freq, **kwargs).reshape(9,nvir,nocc)
+            
+            def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
+                mo2 = mo2.reshape(2,1,1,nvir,nocc)
+                v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
+                v2_p = self._to_vo(v2)
+                v2_m = self._to_vo(v2.transpose(0,1,3,2).conj())
+                v2_p += (e0vo + freq[0] + freq[1]) * mo2[0]
+                v2_m += (e0vo - freq[0] - freq[1]) * mo2[1].conj()
+                v2 = numpy.stack((v2_p, v2_m.conj()))
+                return v2.ravel()
+            
+        else:
+            raise NotImplementedError(freq)
         
-        def vind(mo1):
-            mo1 = mo1.reshape(2,1,nvir,nocc) # mo1[0]=U(+omega), mo1[1]=U*(-omega)
-            # mo1[1] = mo1[1].conj() # mo1[1] = U(-omega) <unnecessary with the identity passed in>
-            v1 = self.get_vind(mo1, with_s1)
-            v1_p = self._to_vo(v1)
-            v1_m = self._to_vo(v1.transpose(0,2,1).conj())
-            v1_p += (e0vo + freq) * mo1[0]
-            v1_m += (e0vo - freq) * mo1[1]
-            v1 = numpy.stack((v1_p, v1_m.conj())) # shape: (2,1,nvir,nocc)
-            return v1.ravel()
-
+        rhs = numpy.stack((rhs, rhs.conj()), axis=1)
         size = rhs[0].size
         operator = numpy.empty((size, size))
         iden = numpy.eye(size)
         for i, row in enumerate(iden):
-            operator[:,i] = vind(row)
+            operator[:,i] = lhs(row)
         
-        mo1 = numpy.linalg.solve(operator, rhs.reshape(3,-1).T).T
-        mo1 = mo1.reshape(rhs.shape).transpose(1,0,2,3)
-        #import pdb; pdb.set_trace()
-        if freq == 0: return mo1[0]
-        else: mo1[1] = mo1[1].conj()
+        if isinstance(freq, (int, float)):
+            mo1 = numpy.linalg.solve(operator, rhs.reshape(3,-1).T).T
+            mo1 = mo1.reshape(rhs.shape).transpose(1,0,2,3)
+            if self.with_s1:
+                mo1oo = self._to_oo(self.get_s1()) * -.5
+                mo1oo = numpy.stack((mo1oo, mo1oo.transpose(0,2,1)))
+                # transpose() is more efficient than conj() for a hermitian matrix
+                mo1 = numpy.concatenate((mo1oo, mo1), axis=-2)
+            
+            log.timer('Direct solver for the first-order CP-HF/KS', *t0)
+            return mo1[0] if freq == 0 else mo1
         
-        log.timer('Direct solver in CPHF/KS', *t0)
-        return mo1
+        else:
+            mo2 = numpy.linalg.solve(operator, rhs.reshape(9,-1).T).T
+            mo2 = mo2.reshape(rhs.shape).transpose(1,0,2,3).reshape(2,3,3,nvir,nocc)
+            if freq == (0,0): mo2 = mo2[0]
+            mo2 = numpy.concatenate((self._mo2oo(freq, **kwargs), mo2), axis=-2)
+
+            log.timer('Direct solver for the second-order CP-HF/KS', *t0)
+            return mo2
 
     def _to_vo(self, ao):
         '''Convert some quantity in AO basis to that in vir.-occ. MO basis.'''

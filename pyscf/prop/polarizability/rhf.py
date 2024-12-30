@@ -71,19 +71,22 @@ def polarizability(polobj, freq=(0,0), **kwargs):
     For a given frequency w, only 9 choices of (a,b) are allowed,
     where a, b are in {0, w, -w}.'''
     log = logger.new_logger(polobj)
-    h1 = polobj._to_vo(polobj.get_h1(**kwargs))
+    if polobj.with_s1:
+        h1 = polobj._to_to(polobj.get_h1(**kwargs))
+    else:
+        h1 = polobj._to_vo(polobj.get_h1(**kwargs))
     try : mo12 = polobj.mo1[freq[1]]
     except KeyError: mo12 = polobj.solve_mo1(freq[1], **kwargs)
 
     if freq[1] == 0:
         # a(w1,w2=0)
-        alpha = -lib.einsum('xji,yji->xy', h1.conj(), mo12) * 2
+        alpha = -lib.einsum('xji,yji->xy', h1.conj(), mo12)
         alpha += alpha.conj()
 
     else:
         # a(w1,w2)
         h1 = numpy.stack((h1.conj(), h1))
-        alpha = -lib.einsum('sxji,syji->xy', h1, mo12) * 2
+        alpha = -lib.einsum('sxji,syji->xy', h1, mo12)
 
         try: mo11 = polobj.mo1[freq[0]]
         except KeyError: mo11 = polobj.solve_mo1(freq[0], **kwargs)
@@ -91,7 +94,7 @@ def polarizability(polobj, freq=(0,0), **kwargs):
             mo11 = numpy.stack((mo11.conj(), -mo11))
         else:
             mo11 = mo11[[1,0]]; mo11[1] = -mo11[1]
-        alpha += lib.einsum('sxji,syji->xy', mo11, mo12) * freq[1] * 2
+        alpha += lib.einsum('sxji,syji->xy', mo11, mo12) * freq[1]
 
     if polobj.verbose >= logger.INFO:
         xx, yy, zz = alpha.diagonal()
@@ -101,7 +104,7 @@ def polarizability(polobj, freq=(0,0), **kwargs):
         log.debug(f'Polarizability tensor a{freq}')
         log.debug(f'{alpha}')
 
-    return alpha
+    return alpha*2 if isinstance(polobj.mf, hf.RHF) else alpha.real
 
 def hyperpolarizability(polobj, freq=(0,0,0), **kwargs):
     '''(First) Hyperpolarizability (with picture change correction if in SFX2C).
@@ -296,148 +299,8 @@ def hyperpolarizability(polobj, freq=(0,0,0), **kwargs):
     return beta
 
 class Polarizability(CPHFBase):
-    def solve_mo1(self, freq=0, solver='krylov', **kwargs):
-        '''CP-HF/KS solver for the first-order MO response $U$.'''
-        assert isinstance(freq, (int, float))
-        solver = solver.lower()
-        if   'direct' in solver: # exact solver
-            mo1 = self._direct_solver(freq, **kwargs)
-        elif 'newton' in solver: # only newton-krylov recommended
-            mo1 = self._newton_solver(freq, **kwargs)
-        elif 'krylov' in solver: # very recommended
-            mo1 = self._krylov_solver(freq, **kwargs)
-        else:
-            raise NotImplementedError(solver)
-        if self.with_s1:
-            viridx = self.mf.mo_occ == 0
-            mo1 = mo1[:,viridx] if freq == 0 else mo1[:,:,viridx]
-        self.mo1[freq] = mo1
-        return mo1
-    
-    def solve_mo2(self, freq=(0,0), solver='krylov', **kwargs):
-        '''CP-HF/KS solver for the second-order MO response $U$.'''
-        assert isinstance(freq, tuple) and len(freq) == 2
-        solver = solver.lower()
-        if   'direct' in solver: # exact solver
-            mo2 = self._direct_solver(freq, **kwargs)
-        elif 'newton' in solver: # only newton-krylov recommended
-            mo2 = self._newton_solver(freq, **kwargs)
-        elif 'krylov' in solver: # very recommended
-            mo2 = self._krylov_solver(freq, **kwargs)
-        else:
-            raise NotImplementedError(solver)
-        self.mo2[freq] = mo2
-        return mo2
-
-    def get_dm1(self, mo1=None, freq=0, **kwargs):
-        '''The first-order density matrix in AO basis.'''
-        if mo1 is None:
-            try: mo1 = self.mo1[freq]
-            except KeyError: mo1 = self.solve_mo1(freq=freq, **kwargs)
-        mf = self.mf
-        mo_coeff = mf.mo_coeff
-        occidx = mf.mo_occ > 0
-        orbv = mo_coeff[:,~occidx]
-        orbo = mo_coeff[:, occidx]
-        
-        if freq == 0:
-            if self.with_s1:
-                dm1 = lib.einsum('pj,xji,qi->xpq', mo_coeff, mo1, orbo.conj()) * 2
-            else:
-                dm1 = lib.einsum('pj,xji,qi->xpq', orbv, mo1, orbo.conj()) * 2
-            dm1 += dm1.transpose(0,2,1).conj()
-        
-        else: # mo1[0] = U(w), mo1[1] = U*(-w)
-            if self.with_s1:
-                dm1 = lib.einsum('pj,xji,qi->xpq', mo_coeff, mo1[0], orbo.conj()) * 2
-                dm1+= lib.einsum('pi,xji,qj->xpq', orbo, mo1[1], mo_coeff.conj()) * 2
-            else:
-                dm1 = lib.einsum('pj,xji,qi->xpq', orbv, mo1[0], orbo.conj()) * 2
-                dm1+= lib.einsum('pi,xji,qj->xpq', orbo, mo1[1], orbv.conj()) * 2
-        
-        return dm1
-    
-    def get_dm2(self, mo2=None, freq=(0,0), with_mo1=True, with_mo2=True, **kwargs):
-        '''The second-order density matrix in AO basis.'''
-        if mo2 is None and with_mo2:
-            try: mo2 = self.mo2[freq]
-            except KeyError: mo2 = self.solve_mo2(freq=freq, **kwargs)
-        mf = self.mf
-        mo_coeff = mf.mo_coeff
-        occidx = mf.mo_occ > 0
-        orbv = mo_coeff[:,~occidx]
-        orbo = mo_coeff[:, occidx]
-        dm22 = dm21 = 0
-
-        if freq == (0,0): # D(0,0)
-            if with_mo2:
-                dm22 = lib.einsum('pj,xyji,qi->xypq', mo_coeff, mo2, orbo.conj()) * 2
-            if with_mo1:
-                try: mo1 = self.mo1[0]
-                except KeyError: mo1 = self.solve_mo1(freq=0, **kwargs)
-                if self.with_s1: # mo1.shape = (3,ntot,nocc)
-                    dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo1, mo1.conj(),
-                                                             mo_coeff.conj()) * 2
-                else:            # mo1.shape = (3,nvir,nocc)
-                    dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo1, mo1.conj(),
-                                                             orbv.conj()) * 2
-            dm2 = dm22 + dm21
-            try: dm2+= dm2.transpose(0,1,3,2).conj()
-            except SyntaxError: pass
-        
-        else: # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
-            if with_mo2:
-                dm22 = lib.einsum('pj,xyji,qi->xypq', mo_coeff, mo2[0], orbo.conj()) * 2
-                dm22+= lib.einsum('pi,xyji,qj->xypq', orbo, mo2[1], mo_coeff.conj()) * 2
-            if with_mo1:
-                if freq[1] == freq[0]: # D(w,w)
-                    try: mo1 = self.mo1[freq[0]]
-                    except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
-                    if self.with_s1:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo1[0], mo1[1],
-                                                                 mo_coeff.conj()) * 2
-                    else:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo1[0], mo1[1],
-                                                                 orbv.conj()) * 2
-                    dm21 += dm21.transpose(1,0,2,3)
-                elif freq[1] == -freq[0]: # D(w,-w)
-                    try: mo1 = self.mo1[freq[0]]
-                    except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
-                    if self.with_s1:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo1[0], mo1[0].conj(),
-                                                                 mo_coeff.conj()) * 2
-                        dm21+= lib.einsum('pj,xki,yji,qk->xypq', mo_coeff, mo1[1], mo1[1].conj(),
-                                                                 mo_coeff.conj()) * 2
-                    else:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo1[0], mo1[0].conj(),
-                                                                 orbv.conj()) * 2
-                        dm21+= lib.einsum('pj,xki,yji,qk->xypq', orbv, mo1[1], mo1[1].conj(),
-                                                                 orbv.conj()) * 2
-                elif 0 in freq: # D(w,0) / D(0,w)
-                    w = freq[0] if freq[0] != 0 else freq[1]
-                    try: mo10 = self.mo1[0]
-                    except KeyError: mo10 = self.solve_mo1(freq=0, **kwargs)
-                    try: mo11 = self.mo1[w]
-                    except KeyError: mo11 = self.solve_mo1(freq=w, **kwargs)
-                    if self.with_s1:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo11[0], mo10.conj(),
-                                                                 mo_coeff.conj()) * 2
-                        dm21+= lib.einsum('pk,xji,yki,qj->xypq', mo_coeff, mo11[1], mo10,
-                                                                 mo_coeff.conj()) * 2
-                    else:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo11[0], mo10.conj(),
-                                                                 orbv.conj()) * 2
-                        dm21+= lib.einsum('pk,xji,yki,qj->xypq', orbv, mo11[1], mo10,
-                                                                 orbv.conj()) * 2
-                    if freq.index(0) == 0: dm21 = dm21.transpose(1,0,2,3)
-                else:
-                    raise ValueError(f'Invalid frequencies `{freq}`.')
-            dm2 = dm22 + dm21
-        
-        return dm2
-
     def get_h1(polobj, picture_change=True, **kwargs):
-        '''Generate the dipole matrix in AO basis.'''
+        '''The dipole matrix in AO basis.'''
         mf = polobj.mf
         mol = mf.mol
         charges = mol.atom_charges()
