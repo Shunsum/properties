@@ -98,48 +98,62 @@ class CPHFBase(lib.StreamObject):
                     dm22 = lib.einsum('pj,xyji,qi->xypq', mo_coeff, mo2[0], orbo.conj())
                     dm22+= lib.einsum('pi,xyji,qj->xypq', orbo, mo2[1], mo_coeff.conj())
             if with_mo1:
-                if freq[1] == freq[0]: # D(w,w)
+                if freq[0] == freq[1]: # D(w,w)
                     try: mo1 = self.mo1[freq[0]]
                     except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
                     if self.with_s1:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo1[0], mo1[1],
-                                                                 mo_coeff.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
+                                          mo_coeff, mo1[0], mo1[1], mo_coeff.conj())
                     else:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo1[0], mo1[1],
-                                                                 orbv.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
+                                          orbv, mo1[0], mo1[1], orbv.conj())
                     dm21 += dm21.transpose(1,0,2,3)
-                elif freq[1] == -freq[0]: # D(w,-w)
+                elif freq[0] == -freq[1]: # D(w,-w)
                     try: mo1 = self.mo1[freq[0]]
                     except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
                     if self.with_s1:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo1[0], mo1[0].conj(),
-                                                                 mo_coeff.conj())
-                        dm21+= lib.einsum('pj,xki,yji,qk->xypq', mo_coeff, mo1[1], mo1[1].conj(),
-                                                                 mo_coeff.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
+                                          mo_coeff, mo1[0], mo1[0].conj(), mo_coeff.conj())
+                        dm21+= lib.einsum('pj,xki,yji,qk->xypq',
+                                          mo_coeff, mo1[1], mo1[1].conj(), mo_coeff.conj())
                     else:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo1[0], mo1[0].conj(),
-                                                                 orbv.conj())
-                        dm21+= lib.einsum('pj,xki,yji,qk->xypq', orbv, mo1[1], mo1[1].conj(),
-                                                                 orbv.conj())
-                elif 0 in freq: # D(w,0) / D(0,w)
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
+                                          orbv, mo1[0], mo1[0].conj(), orbv.conj())
+                        dm21+= lib.einsum('pj,xki,yji,qk->xypq',
+                                          orbv, mo1[1], mo1[1].conj(), orbv.conj())
+                elif 0 in freq: # D(0,w) / D(w,0)
                     w = freq[0] if freq[0] != 0 else freq[1]
                     try: mo10 = self.mo1[0]
                     except KeyError: mo10 = self.solve_mo1(freq=0, **kwargs)
                     try: mo11 = self.mo1[w]
                     except KeyError: mo11 = self.solve_mo1(freq=w, **kwargs)
                     if self.with_s1:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo11[0], mo10.conj(),
-                                                                 mo_coeff.conj())
-                        dm21+= lib.einsum('pk,xji,yki,qj->xypq', mo_coeff, mo11[1], mo10,
-                                                                 mo_coeff.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
+                                          mo_coeff, mo10, mo11[1], mo_coeff.conj())
+                        dm21+= lib.einsum('pk,xji,yki,qj->xypq',
+                                          mo_coeff, mo10.conj(), mo11[0], mo_coeff.conj())
                     else:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo11[0], mo10.conj(),
-                                                                 orbv.conj())
-                        dm21+= lib.einsum('pk,xji,yki,qj->xypq', orbv, mo11[1], mo10,
-                                                                 orbv.conj())
-                    if freq.index(0) == 0: dm21 = dm21.transpose(1,0,2,3)
-                else:
-                    raise ValueError(f'Invalid frequencies `{freq}`.')
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
+                                          orbv, mo10, mo11[1], orbv.conj())
+                        dm21+= lib.einsum('pk,xji,yki,qj->xypq',
+                                          orbv, mo10.conj(), mo11[0], orbv.conj())
+                    if freq.index(0) == 1: dm21 = dm21.transpose(1,0,2,3)
+                else: # D(w1,w2)
+                    w0 = freq[0]; w1 = freq[1]
+                    try: mo10 = self.mo1[w0]
+                    except KeyError: mo10 = self.solve_mo1(freq=w0, **kwargs)
+                    try: mo11 = self.mo1[w1]
+                    except KeyError: mo11 = self.solve_mo1(freq=w1, **kwargs)
+                    if self.with_s1:
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
+                                          mo_coeff, mo10[0], mo11[1], mo_coeff.conj())
+                        dm21+= lib.einsum('pk,xji,yki,qj->xypq',
+                                          mo_coeff, mo10[1], mo11[0], mo_coeff.conj())
+                    else:
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
+                                          orbv, mo10[0], mo11[1], orbv.conj())
+                        dm21+= lib.einsum('pk,xji,yki,qj->xypq',
+                                          orbv, mo10[1], mo11[0], orbv.conj())
             dm2 = dm22 + dm21
         
         return dm2*2 if isinstance(mf, hf.RHF) else dm2
@@ -242,6 +256,14 @@ class CPHFBase(lib.StreamObject):
         e0vo = e0v[:,None] - e0o
         return e0vo
 
+    def get_e0to(self):
+        '''e0to = e0t - e0o.'''
+        mf = self.mf
+        mo_energy = mf.mo_energy
+        e0o = mo_energy[mf.mo_occ>0]
+        e0to = mo_energy[:,None] - e0o
+        return e0to
+
     def solve_mo1(self, freq=0, solver='krylov', **kwargs):
         '''CP-HF/KS solver for the first-order MO response $U$.'''
         assert isinstance(freq, (int, float))
@@ -255,6 +277,7 @@ class CPHFBase(lib.StreamObject):
         else:
             raise NotImplementedError(solver)
         self.mo1[freq] = mo1
+        if freq != 0: self.mo1[-freq] = mo1[[1,0]].conj()
         return mo1
     
     def solve_mo2(self, freq=(0,0), solver='krylov', **kwargs):
@@ -270,6 +293,7 @@ class CPHFBase(lib.StreamObject):
         else:
             raise NotImplementedError(solver)
         self.mo2[freq] = mo2
+        if freq != (0,0): self.mo2[(-freq[0],-freq[1])] = mo2[[1,0]].conj()
         return mo2
 
     def _mo2oo(self, freq=(0,0), **kwargs):
@@ -287,7 +311,7 @@ class CPHFBase(lib.StreamObject):
             mo2oo += mo2oo.transpose(1,0,2,3)
             mo2oo *= -.5
         else:
-            if freq[1] == freq[0]: # U(w,w)
+            if freq[0] == freq[1]: # U(w,w)
                 try: mo1 = self.mo1[freq[0]]
                 except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
                 mo2oo = lib.einsum('xji,yjk->xyik', mo1[1], mo1[0])
@@ -298,7 +322,7 @@ class CPHFBase(lib.StreamObject):
                     us+= lib.einsum('xjk,yji->xyik', mo1[0], s1.conj())
                     mo2oo += us + s2*.5
                 mo2oo += mo2oo.transpose(1,0,2,3)
-            elif freq[1] == -freq[0]: # U(w,-w)
+            elif freq[0] == -freq[1]: # U(w,-w)
                 try: mo1 = self.mo1[freq[0]]
                 except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
                 mo2oo = lib.einsum('xji,yjk->xyik', mo1[1], mo1[0])
@@ -310,25 +334,39 @@ class CPHFBase(lib.StreamObject):
                     us+= lib.einsum('xjk,yji->xyik', mo1[0], s1.conj())
                     us+= us.transpose(1,0,3,2).conj()
                     mo2oo += us + s2
-            elif 0 in freq: # U(w,0) / U(0,w)
+            elif 0 in freq: # U(0,w) / U(w,0)
                 w = freq[0] if freq[0] != 0 else freq[1]
                 try: mo10 = self.mo1[0]
                 except KeyError: mo10 = self.solve_mo1(freq=0, **kwargs)
                 try: mo11 = self.mo1[w]
                 except KeyError: mo11 = self.solve_mo1(freq=w, **kwargs)
-                mo2oo = lib.einsum('xji,yjk->xyik', mo11[1], mo10)
-                mo2oo+= lib.einsum('xjk,yji->xyik', mo11[0], mo10.conj())
+                mo2oo = lib.einsum('xji,yjk->xyik', mo10.conj(), mo11[0])
+                mo2oo+= lib.einsum('xjk,yji->xyik', mo10, mo11[1])
                 if self.with_s1:
                     s2 = self._to_oo(self.get_s2())
                     s1 = self._to_to(self.get_s1())
-                    us = lib.einsum('xji,yjk->xyik', mo11[1], s1)
-                    us+= lib.einsum('xjk,yji->xyik', mo11[0], s1.conj())
-                    us+= lib.einsum('yji,xjk->xyik', mo10, s1)
-                    us+= lib.einsum('yjk,xji->xyik', mo10, s1.conj())
+                    us = lib.einsum('xji,yjk->xyik', mo10.conj(), s1)
+                    us+= lib.einsum('xjk,yji->xyik', mo10, s1.conj())
+                    us+= lib.einsum('xji,yjk->xyik', s1.conj(), mo11[0])
+                    us+= lib.einsum('xjk,yji->xyik', s1, mo11[1])
                     mo2oo += us + s2
-                if freq.index(0) == 0: mo2oo = mo2oo.transpose(1,0,2,3)
-            else:
-                raise ValueError(f'Invalid frequencies `{freq}`.')
+                if freq.index(0) == 1: mo2oo = mo2oo.transpose(1,0,2,3)
+            else: # U(w1,w2)
+                w0 = freq[0]; w1 = freq[1]
+                try: mo10 = self.mo1[w0]
+                except KeyError: mo10 = self.solve_mo1(freq=w0, **kwargs)
+                try: mo11 = self.mo1[w1]
+                except KeyError: mo11 = self.solve_mo1(freq=w1, **kwargs)
+                mo2oo = lib.einsum('xji,yjk->xyik', mo10[1], mo11[0])
+                mo2oo+= lib.einsum('xjk,yji->xyik', mo10[0], mo11[1])
+                if self.with_s1:
+                    s2 = self._to_oo(self.get_s2())
+                    s1 = self._to_to(self.get_s1())
+                    us = lib.einsum('xji,yjk->xyik', mo10[1], s1)
+                    us+= lib.einsum('xjk,yji->xyik', mo10[0], s1.conj())
+                    us+= lib.einsum('xji,yjk->xyik', s1.conj(), mo11[0])
+                    us+= lib.einsum('xjk,yji->xyik', s1, mo11[1])
+                    mo2oo += us + s2
             mo2oo = numpy.stack((mo2oo, mo2oo.transpose(0,1,3,2))) * -.5
         return mo2oo
 
@@ -355,7 +393,7 @@ class CPHFBase(lib.StreamObject):
         rhs -= self.get_vind(self._mo2oo(freq, **kwargs), freq, **kwargs)
         rhs = self._to_vo(rhs)
 
-        if freq[1] == freq[0]:
+        if freq[0] == freq[1]:
             try: mo1 = self.mo1[freq[0]]
             except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
             f1 = self.get_f1(mo1, freq[0], **kwargs)
@@ -385,7 +423,7 @@ class CPHFBase(lib.StreamObject):
                 sym += sym.transpose(1,0,2,3)
                 rhs += sym
 
-        elif freq[1] == -freq[0]:
+        elif freq[0] == -freq[1]:
             try: mo1 = self.mo1[freq[0]]
             except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
             f1_p = self.get_f1(mo1, freq[0], **kwargs)
@@ -418,8 +456,8 @@ class CPHFBase(lib.StreamObject):
                 rhs += lib.einsum('xjk,yki->xyji', mo1[0,:,~occidx], e1_m)
                 rhs += lib.einsum('yjk,xki->xyji', mo1[1,:,~occidx], e1_p)
             else:
-                rhs -= lib.einsum('xjl,yli->xyji', self._to_vo(f1_p), mo1[1])
-                rhs -= lib.einsum('yjl,xli->xyji', self._to_vo(f1_m), mo1[0])
+                rhs -= lib.einsum('xjl,yli->xyji', self._to_vv(f1_p), mo1[1])
+                rhs -= lib.einsum('yjl,xli->xyji', self._to_vv(f1_m), mo1[0])
                 rhs += lib.einsum('xjk,yki->xyji', mo1[0], e1_m)
                 rhs += lib.einsum('yjk,xki->xyji', mo1[1], e1_p)
                 
@@ -442,28 +480,66 @@ class CPHFBase(lib.StreamObject):
                 t1 = self.get_t1(freq=w)
                 
                 tmp = self._to_vo(self.get_s2()) * e0
-                tmp += lib.einsum('xjl,yli,i->xyji', self._to_vt(s1), mo10, e0)
-                tmp += lib.einsum('yjl,xli,i->xyji', self._to_vt(s1), mo11, e0)
-                tmp += lib.einsum('xjk,yki->xyji', self._to_vo(s1), e10)
-                tmp += lib.einsum('yjk,xki->xyji', self._to_vo(s1), e11)
+                tmp += lib.einsum('xjl,yli,i->xyji', self._to_vt(s1), mo11, e0)
+                tmp += lib.einsum('yjl,xli,i->xyji', self._to_vt(s1), mo10, e0)
+                tmp += lib.einsum('xjk,yki->xyji', self._to_vo(s1), e11)
+                tmp += lib.einsum('yjk,xki->xyji', self._to_vo(s1), e10)
 
-                tmp -= lib.einsum('yjl,xli->xyji', self._to_vt(s1), mo11) * w
-                tmp += lib.einsum('xjl,yli->xyji', self._to_vt(t1), mo10) * 1j
-                tmp += self._to_vo(self.get_t2(freq)) * 1j
+                tmp -= lib.einsum('xjl,yli->xyji', self._to_vt(s1), mo11) * w
+                tmp += lib.einsum('yjl,xli->xyji', self._to_vt(t1), mo10) * 1j
+                tmp += self._to_vo(self.get_t2(freq=(0,w))) * 1j
 
-                tmp -= lib.einsum('xjl,yli->xyji', self._to_vt(f11), mo10)
-                tmp -= lib.einsum('yjl,xli->xyji', self._to_vt(f10), mo11)
-                tmp += lib.einsum('xjk,yki->xyji', mo11[:,~occidx], e10)
-                tmp += lib.einsum('yjk,xki->xyji', mo10[:,~occidx], e11)
+                tmp -= lib.einsum('xjl,yli->xyji', self._to_vt(f10), mo11)
+                tmp -= lib.einsum('yjl,xli->xyji', self._to_vt(f11), mo10)
+                tmp += lib.einsum('xjk,yki->xyji', mo10[:,~occidx], e11)
+                tmp += lib.einsum('yjk,xki->xyji', mo11[:,~occidx], e10)
             else:
-                tmp = -lib.einsum('xjl,yli->xyji', self._to_vo(f11), mo10)
-                tmp -= lib.einsum('yjl,xli->xyji', self._to_vo(f10), mo11)
-                tmp += lib.einsum('xjk,yki->xyji', mo11, e10)
-                tmp += lib.einsum('yjk,xki->xyji', mo10, e11)
-            rhs += tmp.transpose(1,0,2,3) if freq.index(0) == 0 else tmp
+                tmp = -lib.einsum('xjl,yli->xyji', self._to_vv(f10), mo11)
+                tmp -= lib.einsum('yjl,xli->xyji', self._to_vv(f11), mo10)
+                tmp += lib.einsum('xjk,yki->xyji', mo10, e11)
+                tmp += lib.einsum('yjk,xki->xyji', mo11, e10)
+            rhs += tmp.transpose(1,0,2,3) if freq.index(0) == 1 else tmp
 
         else:
-            raise ValueError(f'Invalid frequencies `{freq}`.')
+            w0 = freq[0]; w1 = freq[1]
+            try: mo10 = self.mo1[w0]
+            except KeyError: mo10 = self.solve_mo1(freq=w0, **kwargs)
+            try: mo11 = self.mo1[w1]
+            except KeyError: mo11 = self.solve_mo1(freq=w1, **kwargs)
+            f10 = self.get_f1(mo10, w0, **kwargs)
+            f11 = self.get_f1(mo11, w1, **kwargs)
+            e10 = self.get_e1(mo10, w0, **kwargs)
+            e11 = self.get_e1(mo11, w1, **kwargs)
+            mo10 = mo10[0]; mo11 = mo11[0]
+            if self.with_s1: # mo1.shape = (3,ntot,nocc)
+                mf = self.mf
+                occidx = mf.mo_occ > 0
+                e0 = mf.mo_energy[occidx]
+                s1 = self.get_s1()
+                t10 = self.get_t1(freq=w0)
+                t11 = self.get_t1(freq=w1)
+                
+                tmp = self._to_vo(self.get_s2()) * e0
+                tmp += lib.einsum('xjl,yli,i->xyji', self._to_vt(s1), mo11, e0)
+                tmp += lib.einsum('yjl,xli,i->xyji', self._to_vt(s1), mo10, e0)
+                tmp += lib.einsum('xjk,yki->xyji', self._to_vo(s1), e11)
+                tmp += lib.einsum('yjk,xki->xyji', self._to_vo(s1), e10)
+
+                tmp -= lib.einsum('xjl,yli->xyji', self._to_vt(s1), mo11) * w1
+                tmp -= lib.einsum('yjl,xli->xyji', self._to_vt(s1), mo10) * w0
+                tmp += lib.einsum('xjl,yli->xyji', self._to_vt(t10), mo11) * 1j
+                tmp += lib.einsum('yjl,xli->xyji', self._to_vt(t11), mo10) * 1j
+                tmp += self._to_vo(self.get_t2(freq)) * 1j
+
+                tmp -= lib.einsum('xjl,yli->xyji', self._to_vt(f10), mo11)
+                tmp -= lib.einsum('yjl,xli->xyji', self._to_vt(f11), mo10)
+                tmp += lib.einsum('xjk,yki->xyji', mo10[:,~occidx], e11)
+                tmp += lib.einsum('yjk,xki->xyji', mo11[:,~occidx], e10)
+            else:
+                tmp = -lib.einsum('xjl,yli->xyji', self._to_vv(f10), mo11)
+                tmp -= lib.einsum('yjl,xli->xyji', self._to_vv(f11), mo10)
+                tmp += lib.einsum('xjk,yki->xyji', mo10, e11)
+                tmp += lib.einsum('yjk,xki->xyji', mo11, e10)
         
         return rhs
 
@@ -697,7 +773,7 @@ class CPHFBase(lib.StreamObject):
         orbv = mo_coeff[:,~occidx]
         orbo = mo_coeff[:, occidx]
         if ao.ndim == 2:
-            vo = lib.einsum('pj,pq,qi->ji', orbv.conj(), ao, orbo)
+            vo = orbv.T.conj() @ ao @ orbo
         elif ao.ndim == 3:
             vo = lib.einsum('pj,xpq,qi->xji', orbv.conj(), ao, orbo)
         elif ao.ndim == 4:
@@ -713,7 +789,7 @@ class CPHFBase(lib.StreamObject):
         viridx = mf.mo_occ == 0
         orbv = mo_coeff[:, viridx]
         if ao.ndim == 2:
-            vv = lib.einsum('pj,pq,qi->ji', orbv.conj(), ao, orbv)
+            vv = orbv.T.conj() @ ao @ orbv
         elif ao.ndim == 3:
             vv = lib.einsum('pj,xpq,qi->xji', orbv.conj(), ao, orbv)
         elif ao.ndim == 4:
@@ -729,7 +805,7 @@ class CPHFBase(lib.StreamObject):
         occidx = mf.mo_occ > 0
         orbo = mo_coeff[:, occidx]
         if ao.ndim == 2:
-            oo = lib.einsum('pj,pq,qi->ji', orbo.conj(), ao, orbo)
+            oo = orbo.T.conj() @ ao @ orbo
         elif ao.ndim == 3:
             oo = lib.einsum('pj,xpq,qi->xji', orbo.conj(), ao, orbo)
         elif ao.ndim == 4:
@@ -745,7 +821,7 @@ class CPHFBase(lib.StreamObject):
         occidx = mf.mo_occ > 0
         orbo = mo_coeff[:, occidx]
         if ao.ndim == 2:
-            to = lib.einsum('pj,pq,qi->ji', mo_coeff.conj(), ao, orbo)
+            to = mo_coeff.T.conj() @ ao @ orbo
         elif ao.ndim == 3:
             to = lib.einsum('pj,xpq,qi->xji', mo_coeff.conj(), ao, orbo)
         elif ao.ndim == 4:
@@ -761,7 +837,7 @@ class CPHFBase(lib.StreamObject):
         viridx = mf.mo_occ == 0
         orbv = mo_coeff[:, viridx]
         if ao.ndim == 2:
-            vt = lib.einsum('pj,pq,qi->ji', orbv.conj(), ao, mo_coeff)
+            vt = orbv.T.conj() @ ao @ mo_coeff
         elif ao.ndim == 3:
             vt = lib.einsum('pj,xpq,qi->xji', orbv.conj(), ao, mo_coeff)
         elif ao.ndim == 4:
