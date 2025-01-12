@@ -131,19 +131,16 @@ def hyperpolarizability(pl:'Polarizability', freq=(0,0,0), **kwargs):
             are supported. Default is 'krylov'.
     '''
     assert isinstance(freq, tuple) and len(freq) == 3
-    #assert len({abs(f) for f in freq if f != 0}) in (0, 1), '''
-    #For a given frequency w, only 27 freq input choices of (a,b,c) are allowed,
-    #where a, b, c are in {0, w, -w}.'''
     log = logger.new_logger(pl)
     mf = pl.mf
 
-    if freq[0] == freq[1] == freq[2]:
+    if freq[0] == freq[1] == freq[2]: # b(0,0,0) / b(w,w,w)
         try: mo1 = pl.mo1[freq[0]]
         except KeyError: mo1 = pl.solve_mo1(freq[0], **kwargs)
-        f1vv = pl._to_vv(pl.get_f1(mo1, freq[0], **kwargs))
-        f1oo = pl._to_oo(pl.get_f1(mo1, freq[0], **kwargs))
+        f1 = pl.get_f1(mo1, freq[0], **kwargs)
+        f1vv = pl._to_vv(f1)
+        f1oo = pl._to_oo(f1)
         
-        # b(0,0,0) / b(w,w,w)
         if freq[0] == 0:
             beta = -lib.einsum('xjl,yli,zji->xyz', f1vv, mo1, mo1.conj())
             beta += lib.einsum('xik,yji,zjk->xyz', f1oo, mo1, mo1.conj())
@@ -151,10 +148,11 @@ def hyperpolarizability(pl:'Polarizability', freq=(0,0,0), **kwargs):
             beta = -lib.einsum('xjl,yli,zji->xyz', f1vv, mo1[0], mo1[1])
             beta += lib.einsum('xik,yji,zjk->xyz', f1oo, mo1[0], mo1[1])
 
-            try: mo2 = pl.mo2[freq[:-1]]
-            except KeyError: mo2 = pl.solve_mo2(freq[:-1], **kwargs)
-            mo2 = mo2[...,mf.mo_occ==0,:]; mo2[0] *= -1
-            beta += lib.einsum('syzji,sxji->xyz', mo2, mo1[[1,0]])*freq[0]*.5
+            try: mo2 = pl.mo2[freq[1:]]
+            except KeyError: mo2 = pl.solve_mo2(freq[1:], **kwargs)
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2[0] *= -1
+            beta += lib.einsum('syzji,sxji->xyz', mo2, mo1[[1,0]]) * freq[0] * .5
         
         beta += beta.transpose(0,2,1) + beta.transpose(1,0,2) + \
                 beta.transpose(1,2,0) + beta.transpose(2,0,1) + beta.transpose(2,1,0)
@@ -185,24 +183,105 @@ def hyperpolarizability(pl:'Polarizability', freq=(0,0,0), **kwargs):
             kxc = ni.eval_xc_eff(mf.xc, rho, deriv=3)[3] * mf.grids.weights
             beta -= lib.einsum('xig,yjg,zkg,ijkg->xyz', rho1, rho1, rho1, kxc)
 
-    else: # for testing purpose
+    elif len(set(freq)) == 2: # b(we,we,wi) -> b(we,wi,we) / b(wi,we,we)
+        we = next(f for f in set(freq) if freq.count(f) == 2)
+        wi = next(f for f in set(freq) if f != we)
+        try: mo1e = pl.mo1[we]
+        except KeyError: mo1e = pl.solve_mo1(we, **kwargs)
+        try: mo1i = pl.mo1[wi]
+        except KeyError: mo1i = pl.solve_mo1(wi, **kwargs)
+        f1e = pl.get_f1(mo1e, we, **kwargs)
+        f1i = pl.get_f1(mo1i, wi, **kwargs)
+        f1vve = pl._to_vv(f1e)
+        f1ooe = pl._to_oo(f1e)
+        f1vvi = pl._to_vv(f1i)
+        f1ooi = pl._to_oo(f1i)
+
+        if we == 0: mo1e = (mo1e, mo1e.conj())
+        if wi == 0: mo1i = (mo1i, mo1i.conj())
+        
+        beta = -lib.einsum('xjl,yli,zji->xyz', f1vve, mo1e[0], mo1i[1])
+        beta -= lib.einsum('yjl,zli,xji->xyz', f1vve, mo1i[0], mo1e[1])
+        beta -= lib.einsum('zjl,xli,yji->xyz', f1vvi, mo1e[0], mo1e[1])
+        beta += lib.einsum('xik,yji,zjk->xyz', f1ooe, mo1e[0], mo1i[1])
+        beta += lib.einsum('yik,zji,xjk->xyz', f1ooe, mo1i[0], mo1e[1])
+        beta += lib.einsum('zik,xji,yjk->xyz', f1ooi, mo1e[0], mo1e[1])
+
+        if we == 0:
+            mo1e = mo1e[0]
+        else:
+            try: mo2 = pl.mo2[(we,wi)]
+            except KeyError: mo2 = pl.solve_mo2((we,wi), **kwargs)
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2[0] *= -1
+            beta += lib.einsum('syzji,sxji->xyz', mo2, mo1e[[1,0]]) * we
+        if wi == 0:
+            mo1i = mo1i[0]
+        else:
+            try: mo2 = pl.mo2[(we,we)]
+            except KeyError: mo2 = pl.solve_mo2((we,we), **kwargs)
+            if we == 0: mo2 = numpy.stack((mo2, mo2.conj()))
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2[0] *= -1
+            beta += lib.einsum('sxyji,szji->xyz', mo2, mo1i[[1,0]]) * wi * .5
+
+        beta += beta.transpose(1,0,2)
+        beta *= 2
+
+        if isinstance(mf, hf.KohnShamDFT):
+            ni = mf._numint
+            ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
+            xctype = ni._xc_type(mf.xc)
+            dm = mf.make_rdm1()
+            dm1e = pl.get_dm1(mo1e, we)
+            dm1i = pl.get_dm1(mo1i, wi)
+
+            if xctype == 'LDA':
+                ao = ni.eval_ao(mf.mol, mf.grids.coords)
+                rho = ni.eval_rho(mf.mol, ao, dm, xctype=xctype)
+                rho1e = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                     for dmx in dm1e]).reshape(3,1,-1) # reshape to match kxc
+                rho1i = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype)
+                                     for dmx in dm1i]).reshape(3,1,-1) # reshape to match kxc
+                
+            elif xctype == 'GGA' or 'MGGA':
+                ao = ni.eval_ao(mf.mol, mf.grids.coords, deriv=1)
+                rho = ni.eval_rho(mf.mol, ao, dm, xctype=xctype, with_lapl=False)
+                rho1e = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                     with_lapl=False) for dmx in dm1e])
+                rho1i = numpy.stack([ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
+                                     with_lapl=False) for dmx in dm1i])
+                
+            else:
+                raise RuntimeError(f"Unknown xctype '{xctype}'")
+            
+            kxc = ni.eval_xc_eff(mf.xc, rho, deriv=3)[3] * mf.grids.weights
+            beta -= lib.einsum('xig,yjg,zkg,ijkg->xyz', rho1e, rho1e, rho1i, kxc)
+
+        if   freq.index(wi) == 1: beta = beta.transpose(0,2,1)
+        elif freq.index(wi) == 0: beta = beta.transpose(2,1,0)
+
+    else: # b(w1,w2,w3)
         try: mo10 = pl.mo1[freq[0]]
         except KeyError: mo10 = pl.solve_mo1(freq[0], **kwargs)
         try: mo11 = pl.mo1[freq[1]]
         except KeyError: mo11 = pl.solve_mo1(freq[1], **kwargs)
         try: mo12 = pl.mo1[freq[2]]
         except KeyError: mo12 = pl.solve_mo1(freq[2], **kwargs)
-        f1vv0 = pl._to_vv(pl.get_f1(mo10, freq[0], **kwargs))
-        f1oo0 = pl._to_oo(pl.get_f1(mo10, freq[0], **kwargs))
-        f1vv1 = pl._to_vv(pl.get_f1(mo11, freq[1], **kwargs))
-        f1oo1 = pl._to_oo(pl.get_f1(mo11, freq[1], **kwargs))
-        f1vv2 = pl._to_vv(pl.get_f1(mo12, freq[2], **kwargs))
-        f1oo2 = pl._to_oo(pl.get_f1(mo12, freq[2], **kwargs))
+        f10 = pl.get_f1(mo10, freq[0], **kwargs)
+        f11 = pl.get_f1(mo11, freq[1], **kwargs)
+        f12 = pl.get_f1(mo12, freq[2], **kwargs)
+        f1vv0 = pl._to_vv(f10)
+        f1oo0 = pl._to_oo(f10)
+        f1vv1 = pl._to_vv(f11)
+        f1oo1 = pl._to_oo(f11)
+        f1vv2 = pl._to_vv(f12)
+        f1oo2 = pl._to_oo(f12)
 
         if freq[0] == 0: mo10 = (mo10, mo10.conj())
         if freq[1] == 0: mo11 = (mo11, mo11.conj())
         if freq[2] == 0: mo12 = (mo12, mo12.conj())
-        # b(w1,w2,w3)
+        
         beta = -lib.einsum('xjl,yli,zji->xyz', f1vv0, mo11[0], mo12[1])
         beta -= lib.einsum('xjl,zli,yji->xyz', f1vv0, mo12[0], mo11[1])
         beta -= lib.einsum('yjl,xli,zji->xyz', f1vv1, mo10[0], mo12[1])
@@ -221,24 +300,24 @@ def hyperpolarizability(pl:'Polarizability', freq=(0,0,0), **kwargs):
         else:
             try: mo2 = pl.mo2[freq[1:]]
             except KeyError: mo2 = pl.solve_mo2(freq[1:], **kwargs)
-            if freq[1:] == (0,0): mo2 = numpy.stack((mo2, mo2.conj()))
-            mo2 = mo2[...,mf.mo_occ==0,:]; mo2[0] *= -1
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2[0] *= -1
             beta += lib.einsum('syzji,sxji->xyz', mo2, mo10[[1,0]]) * freq[0]
         if freq[1] == 0:
             mo11 = mo11[0]
         else:
             try: mo2 = pl.mo2[(freq[0],freq[2])]
             except KeyError: mo2 = pl.solve_mo2((freq[0],freq[2]), **kwargs)
-            if freq[0] == freq[2] == 0: mo2 = numpy.stack((mo2, mo2.conj()))
-            mo2 = mo2[...,mf.mo_occ==0,:]; mo2[0] *= -1
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2[0] *= -1
             beta += lib.einsum('sxzji,syji->xyz', mo2, mo11[[1,0]]) * freq[1]
         if freq[2] == 0:
             mo12 = mo12[0]
         else:
             try: mo2 = pl.mo2[freq[:-1]]
             except KeyError: mo2 = pl.solve_mo2(freq[:-1], **kwargs)
-            if freq[:-1] == (0,0): mo2 = numpy.stack((mo2, mo2.conj()))
-            mo2 = mo2[...,mf.mo_occ==0,:]; mo2[0] *= -1
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2[0] *= -1
             beta += lib.einsum('sxyji,szji->xyz', mo2, mo12[[1,0]]) * freq[2]
         beta *= 2
         
@@ -310,62 +389,44 @@ hf.RHF.Polarizability = SFX2C1E_SCF.Polarizability = lib.class_as_method(Polariz
 
 
 if __name__ == '__main__':
-    from pyscf import gto, scf
-    mol = gto.Mole()
-    mol.atom = '''h  ,  0.   0.   0.
-                  F  ,  0.   0.   .917'''
-    mol.basis = '631g'
-    mol.build()
+    # static polarizabilities computed via analytical gradient vs. finite field
+    from pyscf import gto
+    mol = gto.M(atom = '''H    0.   0.   0.
+                          F    0.   0.   0.917''')
 
-    mf = scf.RHF(mol).run(conv_tol=1e-14)
-    pl = mf.Polarizability().polarizability()
-    hpol = mf.Polarizability().hyperpolarizability()
-    print(pl)
-
-    mf.verbose = 0
-    charges = mol.atom_charges()
-    coords  = mol.atom_coords()
-    charge_center = numpy.einsum('i,ix->x', charges, coords) / charges.sum()
-    with mol.with_common_orig(charge_center):
-        ao_dip = mol.intor_symmetric('int1e_r', comp=3)
-    h1 = mf.get_hcore()
+    mf = mol.RHF().run(conv_tol=1e-14)
+    hcore = mf.get_hcore()
+    pl = Polarizability(mf)
+    h1 = pl.get_h1()
+    polar = pl.polar()
+    hyperpolar = pl.hyperpolar()
+    
     def apply_E(E):
-        mf.get_hcore = lambda *args, **kwargss: h1 + numpy.einsum('x,xij->ij', E, ao_dip)
+        mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
         return mf.dip_moment(mol, mf.make_rdm1(), unit='AU', verbose=0)
+    print(polar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0.0001, 0])
-    e2 = apply_E([0,-0.0001, 0])
+    e1 = apply_E([ 0, 0.0001, 0])
+    e2 = apply_E([ 0,-0.0001, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0, 0.0001])
-    e2 = apply_E([0, 0,-0.0001])
+    e1 = apply_E([ 0, 0, 0.0001])
+    e2 = apply_E([ 0, 0,-0.0001])
     print((e1 - e2) / 0.0002)
-
-    print(hpol)
+    
     def apply_E(E):
-        mf.get_hcore = lambda *args, **kwargss: h1 + numpy.einsum('x,xij->ij', E, ao_dip)
+        mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
         return Polarizability(mf).polarizability()
+    print(hyperpolar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0.0001, 0])
-    e2 = apply_E([0,-0.0001, 0])
+    e1 = apply_E([ 0, 0.0001, 0])
+    e2 = apply_E([ 0,-0.0001, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0, 0.0001])
-    e2 = apply_E([0, 0,-0.0001])
+    e1 = apply_E([ 0, 0, 0.0001])
+    e2 = apply_E([ 0, 0,-0.0001])
     print((e1 - e2) / 0.0002)
-
-    mol = gto.M(atom='''O      0.   0.       0.
-                        H      0.  -0.757    0.587
-                        H      0.   0.757    0.587''',
-                basis='6-31g')
-    mf = scf.RHF(mol).run(conv_tol=1e-14)
-    print(Polarizability(mf).polarizability())
-    print(Polarizability(mf).polarizability_with_freq(freq= 0.))
-
-    print(Polarizability(mf).polarizability_with_freq(freq= 0.1))
-    print(Polarizability(mf).polarizability_with_freq(freq=-0.1))
-

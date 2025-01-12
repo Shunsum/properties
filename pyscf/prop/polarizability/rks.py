@@ -18,7 +18,6 @@
 
 '''
 Non-relativistic static and dynamic polarizability and hyper-polarizability tensor
-(In testing)
 '''
 
 from pyscf import lib
@@ -28,69 +27,49 @@ from . import rhf
 class Polarizability(rhf.Polarizability):
     pass
 
-
 from pyscf.dft import rks
 rks.RKS.Polarizability = lib.class_as_method(Polarizability)
 
+
 if __name__ == '__main__':
-    import numpy
+    # static polarizabilities computed via analytical gradient vs. finite field
     from pyscf import gto
-    from pyscf import dft
-    mol = gto.Mole()
-    mol.atom = '''h  ,  0.   0.   0.
-                  F  ,  0.   0.   .917'''
-    mol.basis = '631g'
-    mol.build()
+    mol = gto.M(atom = '''H    0.   0.   0.
+                          F    0.   0.   0.917''')
 
-    mf = dft.RKS(mol).run(xc='b3lyp', conv_tol=1e-14)
-    polar = mf.Polarizability().polarizability()
-    hpol = mf.Polarizability().hyper_polarizability()
-    print(polar)
-
-    mf.verbose = 0
-    charges = mol.atom_charges()
-    coords  = mol.atom_coords()
-    charge_center = numpy.einsum('i,ix->x', charges, coords) / charges.sum()
-    with mol.with_common_orig(charge_center):
-        ao_dip = mol.intor_symmetric('int1e_r', comp=3)
-    h1 = mf.get_hcore()
+    mf = mol.RKS(xc='b3lyp').run(conv_tol=1e-14)
+    hcore = mf.get_hcore()
+    pl = Polarizability(mf)
+    h1 = pl.get_h1()
+    polar = pl.polar()
+    hyperpolar = pl.hyperpolar()
+    
     def apply_E(E):
-        mf.get_hcore = lambda *args, **kwargs: h1 + numpy.einsum('x,xij->ij', E, ao_dip)
+        mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
         return mf.dip_moment(mol, mf.make_rdm1(), unit='AU', verbose=0)
+    print(polar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0.0001, 0])
-    e2 = apply_E([0,-0.0001, 0])
+    e1 = apply_E([ 0, 0.0001, 0])
+    e2 = apply_E([ 0,-0.0001, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0, 0.0001])
-    e2 = apply_E([0, 0,-0.0001])
+    e1 = apply_E([ 0, 0, 0.0001])
+    e2 = apply_E([ 0, 0,-0.0001])
     print((e1 - e2) / 0.0002)
-
-    print(hpol)
+    
     def apply_E(E):
-        mf.get_hcore = lambda *args, **kwargs: h1 + numpy.einsum('x,xij->ij', E, ao_dip)
+        mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
         return Polarizability(mf).polarizability()
+    print(hyperpolar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0.0001, 0])
-    e2 = apply_E([0,-0.0001, 0])
+    e1 = apply_E([ 0, 0.0001, 0])
+    e2 = apply_E([ 0,-0.0001, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0, 0.0001])
-    e2 = apply_E([0, 0,-0.0001])
+    e1 = apply_E([ 0, 0, 0.0001])
+    e2 = apply_E([ 0, 0,-0.0001])
     print((e1 - e2) / 0.0002)
-
-    mol = gto.M(atom='''O      0.   0.       0.
-                        H      0.  -0.757    0.587
-                        H      0.   0.757    0.587''',
-                basis='6-31g')
-    mf = dft.RKS(mol).run(xc='b3lyp', conv_tol=1e-14)
-    print(Polarizability(mf).polarizability())
-    print(Polarizability(mf).polarizability_with_freq(freq= 0.))
-
-    print(Polarizability(mf).polarizability_with_freq(freq= 0.1))
-    print(Polarizability(mf).polarizability_with_freq(freq=-0.1))
-

@@ -18,14 +18,7 @@
 
 '''
 Non-relativistic magnetizability tensor for RHF
-(In testing)
-
-Refs:
-[1] R. Cammi, J. Chem. Phys., 109, 3185 (1998)
-[2] Todd A. Keith, Chem. Phys., 213, 123 (1996)
-[3] S. Sauer et al., Mol. Phys., 76, 445 (1991)
 '''
-
 
 import numpy
 from pyscf import lib
@@ -34,6 +27,7 @@ from pyscf.scf import hf, jk, _response_functions  # noqa
 from pyscf.prop.nmr import rhf as rhf_nmr
 from pyscf.prop.cphf import CPHFBase
 from pyscf.data import nist
+
 
 def el_mag_moment(mg:'Magnetizability', gauge_orig=None, with_imag=False):
     '''Electronic magnetic moment'''
@@ -75,7 +69,6 @@ def diamag(mg:'Magnetizability', gauge_orig=None):
 
 def paramag(mg:'Magnetizability', freq=(0,0)):
     '''Paramagnetic magnetizability with GIAO'''
-    log = logger.new_logger(mg)
     mf = mg.mf
     e0 = mf.mo_energy
 
@@ -139,6 +132,12 @@ def get_s1(mol):
         S_{\mu\nu}^(1) = (\mu|g|\nu)'''
     return mol.intor_asymmetric('int1e_igovlp', comp=3) * -1j
 
+def get_t1(mol, freq):
+    r'''(\mu|Rxr|\nu) * w * .5i'''
+    LC = lib.LeviCivita
+    r_nuc = _get_ao_coords(mol)
+    return lib.einsum('xij,vi,juv->xuv', LC, r_nuc, mol.intor('int1e_r'))*freq*.5j
+
 def get_h2(mol, gauge_orig=None, picture_change=True):
     r'''The second-order core Hamiltonian wrt the external magnetic field.
         Without gauge origin (using GIAO):
@@ -167,18 +166,18 @@ def get_h2(mol, gauge_orig=None, picture_change=True):
 
 def get_jk2(mol, dm0):
     r'''The second-order JK wrt the external magnetic field.
-        J_{\mu\nu}^(2) = D_{\lambda\kappa}^0 (gg\mu\nu|\kappa\lambda)
-                       + D_{\lambda\kappa}^0 (gg\kappa\lambda|\mu\nu)
-                       + D_{\lambda\kappa}^0 (g\mu\nu|g\kappa\lambda)
-                       + D_{\lambda\kappa}^0 (g\kappa\lambda|g\mu\nu)
-        K_{\mu\nu}^(2) = D_{\lambda\kappa}^0 (gg\mu\lambda|\kappa\nu)
-                       + D_{\lambda\kappa}^0 (gg\kappa\nu|\mu\lambda)
-                       + D_{\lambda\kappa}^0 (g\mu\lambda|g\kappa\nu)
-                       + D_{\lambda\kappa}^0 (g\kappa\nu|g\mu\lambda)
-            # D_{\lambda\kappa}^0 (\mu\lambda|gg\kappa\nu)
-            #    = D_{\lambda\kappa}^0 (gg\kappa\nu|\mu\lambda)
-            #    = D_{\kappa\lambda}^0 (gg\lambda\nu|\mu\kappa)
-            #    = the h.c. of D_{\lambda\kappa}^0 (gg\mu\lambda|\kappa\nu)
+        J_{\mu\nu}^(2) = D_{\lambda\kappa}^(0) (gg\mu\nu|\kappa\lambda)
+                       + D_{\lambda\kappa}^(0) (gg\kappa\lambda|\mu\nu)
+                       + D_{\lambda\kappa}^(0) (g\mu\nu|g\kappa\lambda)
+                       + D_{\lambda\kappa}^(0) (g\kappa\lambda|g\mu\nu)
+        K_{\mu\nu}^(2) = D_{\lambda\kappa}^(0) (gg\mu\lambda|\kappa\nu)
+                       + D_{\lambda\kappa}^(0) (gg\kappa\nu|\mu\lambda)
+                       + D_{\lambda\kappa}^(0) (g\mu\lambda|g\kappa\nu)
+                       + D_{\lambda\kappa}^(0) (g\kappa\nu|g\mu\lambda)
+            # D_{\lambda\kappa}^(0) (\mu\lambda|gg\kappa\nu)
+            #    = D_{\lambda\kappa}^(0) (gg\kappa\nu|\mu\lambda)
+            #    = D_{\kappa\lambda}^(0) (gg\lambda\nu|\mu\kappa)
+            #    = the h.c. of D_{\lambda\kappa}^(0) (gg\mu\lambda|\kappa\nu)
         JK^(2) = J^(2) - .5*K^(2)'''
     j2  = numpy.sum(jk.get_jk(mol, [dm0]*2, ['ijkl,lk->s2ij', 'ijkl,ji->s2kl'],
                     'int2e_gg1' , 's4' , comp=9, hermi=1), axis=0)
