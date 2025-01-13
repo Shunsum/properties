@@ -20,8 +20,8 @@ def rho_eff(rho, collinear):
         return rho
     else:
         raise RuntimeError(f"Unknown collinear scheme '{collinear}'")
-    rhop = numpy.stack([(n + s) * .5, (n - s) * .5])
-    return rhop
+    rho = numpy.stack([n + s, n - s]) * .5
+    return rho
 
 def get_dm1(polobj, mo1):
     '''

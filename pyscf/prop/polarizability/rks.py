@@ -21,14 +21,14 @@ Non-relativistic static and dynamic polarizability and hyper-polarizability tens
 '''
 
 from pyscf import lib
-from . import rhf
+from pyscf.dft import rks
+from .rhf import RHFPolar
 
 
-class Polarizability(rhf.Polarizability):
+class RKSPolar(RHFPolar):
     pass
 
-from pyscf.dft import rks
-rks.RKS.Polarizability = lib.class_as_method(Polarizability)
+rks.RKS.Polarizability = lib.class_as_method(RKSPolar)
 
 
 if __name__ == '__main__':
@@ -39,7 +39,7 @@ if __name__ == '__main__':
 
     mf = mol.RKS(xc='b3lyp').run(conv_tol=1e-14)
     hcore = mf.get_hcore()
-    pl = Polarizability(mf)
+    pl = RKSPolar(mf)
     h1 = pl.get_h1()
     polar = pl.polar()
     hyperpolar = pl.hyperpolar()
@@ -47,7 +47,7 @@ if __name__ == '__main__':
     def apply_E(E):
         mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
-        return mf.dip_moment(mol, mf.make_rdm1(), unit='AU', verbose=0)
+        return -mf.dip_moment(mol, mf.make_rdm1(), unit='AU', verbose=0)
     print(polar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])
@@ -62,7 +62,7 @@ if __name__ == '__main__':
     def apply_E(E):
         mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
-        return Polarizability(mf).polarizability()
+        return RKSPolar(mf).polarizability()
     print(hyperpolar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])

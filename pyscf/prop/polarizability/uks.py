@@ -18,74 +18,60 @@
 
 '''
 Non-relativistic static and dynamic polarizability and hyper-polarizability tensor
-(In testing)
 '''
 
 from pyscf import lib
-from . import uhf
+from pyscf.dft import uks
+from .uhf import UHFPolar
 
 
-class Polarizability(uhf.Polarizability):
+class UKSPolar(UHFPolar):
     pass
 
-
-from pyscf.dft import uks
-uks.UKS.Polarizability = lib.class_as_method(Polarizability)
+uks.UKS.Polarizability = lib.class_as_method(UKSPolar)
 
 if __name__ == '__main__':
-    import numpy
+    # static polarizabilities computed via analytical gradient vs. finite field
     from pyscf import gto
-    from pyscf import dft
-    mol = gto.M(atom='''O      0.   0.       0.
-                        H      0.  -0.757    0.587
-                        H      0.   0.757    0.587''',
-                basis='6-31g')
-    mf = dft.UKS(mol).run(xc='b3lyp', conv_tol=1e-14)
-    polar = mf.Polarizability().polarizability()
-    hpol = mf.Polarizability().hyper_polarizability()
+    mol = gto.M(atom = '''O    0.    0.       0.
+                          H    0.   -0.757    0.587
+                          H    0.    0.757    0.587''',
+                charge = 1,
+                spin = 1)
+
+    mf = mol.UKS(xc='b3lyp').run(conv_tol=1e-14)
+    hcore = mf.get_hcore()
+    pl = UKSPolar(mf)
+    h1 = pl.get_h1()
+    polar = pl.polar()
+    hyperpolar = pl.hyperpolar()
+    
+    def apply_E(E):
+        mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
+        mf.run(conv_tol=1e-14)
+        return -mf.dip_moment(mol, mf.make_rdm1(), unit='AU', verbose=0)
     print(polar)
-
-    mf.verbose = 0
-    charges = mol.atom_charges()
-    coords  = mol.atom_coords()
-    charge_center = numpy.einsum('i,ix->x', charges, coords) / charges.sum()
-    with mol.with_common_orig(charge_center):
-        ao_dip = mol.intor_symmetric('int1e_r', comp=3)
-    h1 = mf.get_hcore()
-    def apply_E(E):
-        mf.get_hcore = lambda *args, **kwargs: h1 + numpy.einsum('x,xij->ij', E, ao_dip)
-        mf.run(conv_tol=1e-14)
-        return mf.dip_moment(mol, mf.make_rdm1(), unit='AU', verbose=0)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0.0001, 0])
-    e2 = apply_E([0,-0.0001, 0])
+    e1 = apply_E([ 0, 0.0001, 0])
+    e2 = apply_E([ 0,-0.0001, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0, 0.0001])
-    e2 = apply_E([0, 0,-0.0001])
+    e1 = apply_E([ 0, 0, 0.0001])
+    e2 = apply_E([ 0, 0,-0.0001])
     print((e1 - e2) / 0.0002)
-
-    # Small discrepancy found between analytical derivatives and finite
-    # differences
-    print(hpol)
+    
     def apply_E(E):
-        mf.get_hcore = lambda *args, **kwargs: h1 + numpy.einsum('x,xij->ij', E, ao_dip)
+        mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
-        return Polarizability(mf).polarizability()
+        return UKSPolar(mf).polarizability()
+    print(hyperpolar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0.0001, 0])
-    e2 = apply_E([0,-0.0001, 0])
+    e1 = apply_E([ 0, 0.0001, 0])
+    e2 = apply_E([ 0,-0.0001, 0])
     print((e1 - e2) / 0.0002)
-    e1 = apply_E([0, 0, 0.0001])
-    e2 = apply_E([0, 0,-0.0001])
+    e1 = apply_E([ 0, 0, 0.0001])
+    e2 = apply_E([ 0, 0,-0.0001])
     print((e1 - e2) / 0.0002)
-
-    print(Polarizability(mf).polarizability())
-    print(Polarizability(mf).polarizability_with_freq(freq= 0.))
-
-    print(Polarizability(mf).polarizability_with_freq(freq= 0.1))
-    print(Polarizability(mf).polarizability_with_freq(freq=-0.1))
-
