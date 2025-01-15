@@ -3,9 +3,10 @@
 import numpy
 from pyscf import lib
 from pyscf.lib import logger
+from pyscf.dft.dks import DKS
 from pyscf.scf import hf, ghf
 from pyscf.x2c import x2c, _response_functions
-from . import rhf
+from .rhf import RHFPolar
 
 
 def rho_eff(rho, collinear):
@@ -19,374 +20,449 @@ def rho_eff(rho, collinear):
     elif collinear[0] == 'm':  # mcol
         return rho
     else:
-        raise RuntimeError(f"Unknown collinear scheme '{collinear}'")
-    rho = numpy.stack([n + s, n - s]) * .5
+        raise RuntimeError(f'Unknown collinear scheme `{collinear}`')
+    rho = numpy.array([n + s, n - s]) * .5
     return rho
 
-def get_dm1(polobj, mo1):
-    '''
-    Generate the 1st-order density matrix in AO basis.
-    '''
-    mf = polobj.mf
-    mo_coeff = mf.mo_coeff
-    occidx = mf.mo_occ > 0
-    orbv = mo_coeff[:,~occidx]
-    orbo = mo_coeff[:, occidx]
-    if len(mo1) == 2:
-        dm1  = lib.einsum('pj,xji,qi->xpq', orbv, mo1[0]       , orbo.conj())
-        dm1 += lib.einsum('pi,xji,qj->xpq', orbo, mo1[1].conj(), orbv.conj())
-    elif len(mo1) == 3:
-        dm1  = lib.einsum('pj,xji,qi->xpq', orbv, mo1, orbo.conj())
-        dm1 += dm1.transpose(0,2,1).conj()
-    else:
-        raise ValueError('mo1 does not have the correct shape (3,nvir,nocc)'
-                         ' for freq = 0 or (2,3,nvir,nocc) for freq != 0.')
-    return dm1
-
-def get_h1(polobj, picture_change=True):
-    '''
-    Generate the dipole matrix in AO basis.
-    '''
-    mf = polobj.mf
-    mol = mf.mol
-    charges = mol.atom_charges()
-    coords  = mol.atom_coords()
-    charge_center = lib.einsum('i,ix->x', charges, coords) / charges.sum()
-    with mol.with_common_orig(charge_center):
-        ao_dip = mol.intor_symmetric('int1e_r', comp=3)
-        ao_dip = numpy.kron(numpy.eye(2), ao_dip)
-        if isinstance(mf, x2c.X2C1E_GSCF) and picture_change:
-            xmol = mf.with_x2c.get_xmol()[0]
-            ao_dip = xmol.intor_symmetric('int1e_r')
-            ao_dip = numpy.kron(numpy.eye(2), ao_dip)
-            nao = xmol.nao
-            prp = xmol.intor_symmetric('int1e_sprsp').reshape(3,4,nao,nao)
-            prp = _dirac_relation(prp)
-            c = lib.param.LIGHT_SPEED
-            ao_dip = mf.with_x2c.picture_change((ao_dip, prp/(2*c)**2))
-    return -ao_dip
-
-# Note: polarizability and relevant properties are demanding on basis sets.
-# ORCA recommends to use Sadlej basis for these properties.
-def polarizability(polobj, freq=0, picture_change=True, solver='krylov'):
-    '''
-    Polarizability with picture change correction.
-    '''
-    log = logger.new_logger(polobj)
-    mf = polobj.mf
-    h1 = polobj.get_h1vo(picture_change)
-    mo1 = polobj.get_mo1(freq, picture_change, solver)
+def hyperpolarizability(pl:'GHFPolar', freq=(0,0,0), **kwargs):
+    '''(First) Hyperpolarizability (with picture change correction if in SFX2C).
     
-    if freq == 0:
-        # alpha(0;0)
-        alpha  = -lib.einsum('xji,yji->xy', h1.conj(), mo1)
-        alpha += alpha.conj()
-
-    else:
-        # alpha(-omega;omega)
-        alpha  = -lib.einsum('xji,yji->xy', h1.conj(), mo1[0])
-        alpha += -lib.einsum('xji,yji->xy', h1, mo1[1].conj())
-
-    if mf.verbose >= logger.INFO:
-        xx, yy, zz = alpha.diagonal()
-        log.note('Isotropic polarizability %.12g', (xx+yy+zz)/3)
-        log.note('Polarizability anisotropy %.12g',
-                 (.5 * ((xx-yy)**2 + (yy-zz)**2 + (zz-xx)**2))**.5)
-        log.debug(f'Dynamic polarizability tensor alpha({-freq};{freq})')
-        log.debug(f'{alpha}')
-
-    return alpha.real
-
-def hyperpolarizability(polobj, freq=0, type='SHG', picture_change=True, solver='krylov'):
+    Kwargs:
+        picture_change : bool
+            Whether to include the picture change correction in SFX2C.
+            Default is True.
+        solver : str
+            The solver to use for the CP-HF/KS equations. Only
+            'direct': Direct method to solve the linear equations;
+            'newton': Newton iterative method with the inverse projected into
+                      the Krylov subspace; and
+            'krylov': Krylov subspace method to project the solution into the
+                      Krylov subspace;
+            are supported. Default is 'krylov'.
     '''
-    Hyperpolarizability with picture change correction.
-    '''
-    log = logger.new_logger(polobj)
-    mf = polobj.mf
+    assert isinstance(freq, tuple) and len(freq) == 3
+    log = logger.new_logger(pl)
+    mf = pl.mf
 
-    if freq == 0:
-        mo1 = polobj.get_mo1(freq, picture_change, solver)
-        f1 = polobj.get_f1vv(mo1, picture_change)
-        e1 = polobj.get_e1(mo1, picture_change)
+    if freq[0] == freq[1] == freq[2]: # b(0,0,0) / b(w,w,w)
+        try: mo1 = pl.mo1[freq[0]]
+        except KeyError: mo1 = pl.solve_mo1(freq[0], **kwargs)
+        f1 = pl.get_f1(mo1, freq[0], **kwargs)
+        f1vv = pl._to_vv(f1)
+        f1oo = pl._to_oo(f1)
+        
+        if freq[0] == 0:
+            beta = -lib.einsum('xjl,yli,zji->xyz', f1vv, mo1, mo1.conj())
+            beta += lib.einsum('xik,yji,zjk->xyz', f1oo, mo1, mo1.conj())
+        else:
+            beta = -lib.einsum('xjl,yli,zji->xyz', f1vv, mo1[0], mo1[1])
+            beta += lib.einsum('xik,yji,zjk->xyz', f1oo, mo1[0], mo1[1])
 
-        # beta(0;0,0)
-        beta = -lib.einsum('xjl,yji,zli->xyz', f1, mo1.conj(), mo1)
-        beta += lib.einsum('xik,yjk,zji->xyz', e1, mo1.conj(), mo1)
+            try: mo2 = pl.mo2[freq[1:]]
+            except KeyError: mo2 = pl.solve_mo2(freq[1:], **kwargs)
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
+            mo2[0] *= -1
+            beta += lib.einsum('syzji,sxji->xyz', mo2, mo1[[1,0]]) * freq[0] * .5
+        
         beta += beta.transpose(0,2,1) + beta.transpose(1,0,2) + \
                 beta.transpose(1,2,0) + beta.transpose(2,0,1) + beta.transpose(2,1,0)
-                
+        
         if isinstance(mf, hf.KohnShamDFT):
+            mol = mf.mol
             ni = mf._numint
             ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
+            col = ni.collinear
             xctype = ni._xc_type(mf.xc)
-            dm = mf.make_rdm1()
-            dm1 = polobj.get_dm1(mo1=mo1)
-
+            dm0 = mf.make_rdm1()
+            dm1 = pl.get_dm1(mo1, freq[0])
+            nao = dm0.shape[-1]
+            cur_mem = lib.current_memory()[0]
+            max_memory = max(2000, mf.max_memory*.8 - cur_mem)
+            
             if xctype == 'LDA':
-                if isinstance(mf, x2c.SCF):
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords, with_s=False)
+                if isinstance(mf, DKS):
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory,
+                                               with_s=True)
                 else:
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords)
-                rho = ni.eval_rho(mf.mol, ao, dm, xctype=xctype).real
-                rho1 = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype),
-                                            ni.collinear) for dmx in dm1])
-                rho1 = rho1[:,:,None,:] # reshape to match kxc
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory)
+
+                if col[0] == 'm': 
+                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
+                else:
+                    eval_xc = ni.eval_xc_eff
                 
+                for ao, mask, weight, coords in block_loop:
+                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype, hermi=1).real
+                    rho1 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                        hermi=freq[0]==0), col) for dm in dm1])
+                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3]
+                    kxc = kxc[:,0,:,0,:,0] * weight
+                    beta -= lib.einsum('xag,ybg,zcg,abcg->xyz', rho1, rho1, rho1, kxc)
+
             elif xctype == 'GGA' or 'MGGA':
-                if isinstance(mf, x2c.SCF):
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords, deriv=1, with_s=False)
+                if isinstance(mf, DKS):
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory,
+                                               with_s=True)
                 else:
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords, deriv=1)
-                rho = ni.eval_rho(mf.mol, ao, dm, xctype=xctype, with_lapl=False).real
-                rho1 = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
-                                                        with_lapl=False),
-                                            ni.collinear) for dmx in dm1])
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory)
+
+                if col[0] == 'm': 
+                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
+                else:
+                    eval_xc = ni.eval_xc_eff
                 
+                for ao, mask, weight, coords in block_loop:
+                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
+                                       hermi=1, with_lapl=False).real
+                    rho1 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                        hermi=freq[0]==0, with_lapl=False), col)
+                                        for dm in dm1])
+                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
+                    beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz',
+                                       rho1, rho1, rho1, kxc)
+
+            elif xctype == 'HF':
+                pass
+
             else:
-                raise RuntimeError(f"Unknown xctype '{xctype}'")
-            
-            if ni.collinear[0] == 'm': 
-                eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
-            else:
-                eval_xc = ni.eval_xc_eff
-            
-            kxc = eval_xc(mf.xc, rho, deriv=3)[3] * mf.grids.weights
-            beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz', rho1, rho1, rho1, kxc)
+                raise NotImplementedError(xctype)
 
-        if mf.verbose >= logger.INFO:
-            log.debug(f'Static hyperpolarizability tensor beta({freq};{freq},{freq})')
-            log.debug(f'{beta}')
-    
-    elif type.upper() == 'SHG':
-        mo1_2o = polobj.get_mo1(freq*2, picture_change, solver)
-        f1_m2o = polobj.get_f1vv(mo1_2o, picture_change).transpose(0,2,1).conj()
-        e1_m2o = polobj.get_e1(mo1_2o, picture_change).transpose(0,2,1).conj()
+    elif len(set(freq)) == 2: # b(we,we,wi) -> b(we,wi,we) / b(wi,we,we)
+        we = next(f for f in set(freq) if freq.count(f) == 2)
+        wi = next(f for f in set(freq) if f != we)
+        try: mo1e = pl.mo1[we]
+        except KeyError: mo1e = pl.solve_mo1(we, **kwargs)
+        try: mo1i = pl.mo1[wi]
+        except KeyError: mo1i = pl.solve_mo1(wi, **kwargs)
+        f1e = pl.get_f1(mo1e, we, **kwargs)
+        f1i = pl.get_f1(mo1i, wi, **kwargs)
+        f1vve = pl._to_vv(f1e)
+        f1ooe = pl._to_oo(f1e)
+        f1vvi = pl._to_vv(f1i)
+        f1ooi = pl._to_oo(f1i)
 
-        mo1_1o = polobj.get_mo1(freq, picture_change, solver)
-        f1_p1o = polobj.get_f1vv(mo1_1o, picture_change)
-        e1_p1o = polobj.get_e1(mo1_1o, picture_change)
+        if we == 0: mo1e = (mo1e, mo1e.conj())
+        if wi == 0: mo1i = (mo1i, mo1i.conj())
+        
+        beta = -lib.einsum('xjl,yli,zji->xyz', f1vve, mo1e[0], mo1i[1])
+        beta -= lib.einsum('yjl,zli,xji->xyz', f1vve, mo1i[0], mo1e[1])
+        beta -= lib.einsum('zjl,xli,yji->xyz', f1vvi, mo1e[0], mo1e[1])
+        beta += lib.einsum('xik,yji,zjk->xyz', f1ooe, mo1e[0], mo1i[1])
+        beta += lib.einsum('yik,zji,xjk->xyz', f1ooe, mo1i[0], mo1e[1])
+        beta += lib.einsum('zik,xji,yjk->xyz', f1ooi, mo1e[0], mo1e[1])
 
-        # beta(-2omega;omega,omega)
-        beta = -lib.einsum('xjl,yji,zli->xyz', f1_m2o, mo1_1o[1].conj(), mo1_1o[0])
-        beta +=-lib.einsum('yjl,xji,zli->xyz', f1_p1o, mo1_2o[0].conj(), mo1_1o[0])
-        beta +=-lib.einsum('zjl,yji,xli->xyz', f1_p1o, mo1_1o[1].conj(), mo1_2o[1])
-        beta += lib.einsum('xik,yjk,zji->xyz', e1_m2o, mo1_1o[1].conj(), mo1_1o[0])
-        beta += lib.einsum('yik,xjk,zji->xyz', e1_p1o, mo1_2o[0].conj(), mo1_1o[0])
-        beta += lib.einsum('zik,yjk,xji->xyz', e1_p1o, mo1_1o[1].conj(), mo1_2o[1])
-        beta += beta.transpose(0,2,1)
-            
+        if we == 0:
+            mo1e = mo1e[0]
+        else:
+            try: mo2 = pl.mo2[(we,wi)]
+            except KeyError: mo2 = pl.solve_mo2((we,wi), **kwargs)
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
+            mo2[0] *= -1
+            beta += lib.einsum('syzji,sxji->xyz', mo2, mo1e[[1,0]]) * we
+        if wi == 0:
+            mo1i = mo1i[0]
+        else:
+            try: mo2 = pl.mo2[(we,we)]
+            except KeyError: mo2 = pl.solve_mo2((we,we), **kwargs)
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            if we == 0: mo2 = numpy.array((mo2, mo2.conj()))
+            mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
+            mo2[0] *= -1
+            beta += lib.einsum('sxyji,szji->xyz', mo2, mo1i[[1,0]]) * wi * .5
+
+        beta += beta.transpose(1,0,2)
+
         if isinstance(mf, hf.KohnShamDFT):
+            mol = mf.mol
             ni = mf._numint
             ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
+            col = ni.collinear
             xctype = ni._xc_type(mf.xc)
-            dm = mf.make_rdm1()
-            dm1_m2o = polobj.get_dm1(mo1=mo1_2o).transpose(0,2,1).conj()
-            dm1_p1o = polobj.get_dm1(mo1=mo1_1o)
+            dm0 = mf.make_rdm1()
+            dm1e = pl.get_dm1(mo1e, we)
+            dm1i = pl.get_dm1(mo1i, wi)
+            nao = dm0.shape[-1]
+            cur_mem = lib.current_memory()[0]
+            max_memory = max(2000, mf.max_memory*.8 - cur_mem)
 
             if xctype == 'LDA':
-                if isinstance(mf, x2c.SCF):
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords, with_s=False)
+                if isinstance(mf, DKS):
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory,
+                                               with_s=True)
                 else:
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords)
-                rho = ni.eval_rho(mf.mol, ao, dm, xctype=xctype).real
-                rho1_m2o = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype),
-                                                ni.collinear) for dmx in dm1_m2o])
-                rho1_m2o = rho1_m2o[:,:,None,:] # reshape to match kxc
-                rho1_p1o = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype),
-                                                ni.collinear) for dmx in dm1_p1o])
-                rho1_p1o = rho1_p1o[:,:,None,:] # reshape to match kxc
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory)
+
+                if col[0] == 'm': 
+                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
+                else:
+                    eval_xc = ni.eval_xc_eff
+                
+                for ao, mask, weight, coords in block_loop:
+                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype, hermi=1).real
+                    rho1e = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                         hermi=we==0), col) for dm in dm1e])
+                    rho1i = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                         hermi=wi==0), col) for dm in dm1i])
+                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3]
+                    kxc = kxc[:,0,:,0,:,0] * weight
+                    beta -= lib.einsum('xag,ybg,zcg,abcg->xyz', rho1e, rho1e, rho1i, kxc)
             
             elif xctype == 'GGA' or 'MGGA':
-                if isinstance(mf, x2c.SCF):
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords, deriv=1, with_s=False)
+                if isinstance(mf, DKS):
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory,
+                                               with_s=True)
                 else:
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords, deriv=1)
-                rho = ni.eval_rho(mf.mol, ao, dm, xctype=xctype, with_lapl=False).real
-                rho1_m2o = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
-                                                            with_lapl=False),
-                                                ni.collinear) for dmx in dm1_m2o])
-                rho1_p1o = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
-                                                            with_lapl=False),
-                                                ni.collinear) for dmx in dm1_p1o])
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory)
+
+                if col[0] == 'm': 
+                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
+                else:
+                    eval_xc = ni.eval_xc_eff
+                
+                for ao, mask, weight, coords in block_loop:
+                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
+                                       hermi=1, with_lapl=False).real
+                    rho1e = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                         hermi=we==0, with_lapl=False), col)
+                                         for dm in dm1e])
+                    rho1i = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                         hermi=wi==0, with_lapl=False), col)
+                                         for dm in dm1i])
+                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
+                    beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz',
+                                       rho1e, rho1e, rho1i, kxc)
+            
+            elif xctype == 'HF':
+                pass
 
             else:
-                raise RuntimeError(f"Unknown xctype '{xctype}'")
-        
-            if ni.collinear[0] == 'm': 
-                eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
-            else:
-                eval_xc = ni.eval_xc_eff
-            
-            kxc = eval_xc(mf.xc, rho, deriv=3)[3] * mf.grids.weights
-            beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz',
-                                rho1_m2o, rho1_p1o, rho1_p1o, kxc)
-        
-        if mf.verbose >= logger.INFO:
-            log.debug(f'{type} hyperpolarizability tensor beta({-2*freq};{freq},{freq})')
-            log.debug(f'{beta}')
-        
-    elif type.upper() == 'EOPE' or 'OR':    
-        mo1_1o = polobj.get_mo1(freq, picture_change, solver)
-        f1_p1o = polobj.get_f1vv(mo1_1o, picture_change)
-        f1_m1o = f1_p1o.transpose(0,2,1).conj()
-        e1_p1o = polobj.get_e1(mo1_1o, picture_change)
-        e1_m1o = e1_p1o.transpose(0,2,1).conj()
+                raise NotImplementedError(xctype)
 
-        mo1 = polobj.get_mo1(0, picture_change, solver)
-        f1 = polobj.get_f1vv(mo1, 0, picture_change)
-        e1 = polobj.get_e1(mo1, 0, picture_change)
+        if   freq.index(wi) == 1: beta = beta.transpose(0,2,1)
+        elif freq.index(wi) == 0: beta = beta.transpose(2,1,0)
 
-        # beta(-omega;omega,0)
-        beta = -lib.einsum('xjl,yji,zli->xyz', f1_m1o, mo1_1o[1].conj(), mo1)
-        beta +=-lib.einsum('xjl,zji,yli->xyz', f1_m1o, mo1.conj(), mo1_1o[0])
-        beta +=-lib.einsum('yjl,xji,zli->xyz', f1_p1o, mo1_1o[0].conj(), mo1)
-        beta +=-lib.einsum('yjl,zji,xli->xyz', f1_p1o, mo1.conj(), mo1_1o[1])
-        beta +=-lib.einsum('zjl,xji,yli->xyz', f1, mo1_1o[0].conj(), mo1_1o[0])
-        beta +=-lib.einsum('zjl,yji,xli->xyz', f1, mo1_1o[1].conj(), mo1_1o[1])
-        beta += lib.einsum('xik,yjk,zji->xyz', e1_m1o, mo1_1o[1].conj(), mo1)
-        beta += lib.einsum('xik,zjk,yji->xyz', e1_m1o, mo1.conj(), mo1_1o[0])
-        beta += lib.einsum('yik,xjk,zji->xyz', e1_p1o, mo1_1o[0].conj(), mo1)
-        beta += lib.einsum('yik,zjk,xji->xyz', e1_p1o, mo1.conj(), mo1_1o[1])
-        beta += lib.einsum('zik,xjk,yji->xyz', e1, mo1_1o[0].conj(), mo1_1o[0])
-        beta += lib.einsum('zik,yjk,xji->xyz', e1, mo1_1o[1].conj(), mo1_1o[1])
-            
+    else: # b(w1,w2,w3)
+        try: mo10 = pl.mo1[freq[0]]
+        except KeyError: mo10 = pl.solve_mo1(freq[0], **kwargs)
+        try: mo11 = pl.mo1[freq[1]]
+        except KeyError: mo11 = pl.solve_mo1(freq[1], **kwargs)
+        try: mo12 = pl.mo1[freq[2]]
+        except KeyError: mo12 = pl.solve_mo1(freq[2], **kwargs)
+        f10 = pl.get_f1(mo10, freq[0], **kwargs)
+        f11 = pl.get_f1(mo11, freq[1], **kwargs)
+        f12 = pl.get_f1(mo12, freq[2], **kwargs)
+        f1vv0 = pl._to_vv(f10)
+        f1oo0 = pl._to_oo(f10)
+        f1vv1 = pl._to_vv(f11)
+        f1oo1 = pl._to_oo(f11)
+        f1vv2 = pl._to_vv(f12)
+        f1oo2 = pl._to_oo(f12)
+
+        if freq[0] == 0: mo10 = (mo10, mo10.conj())
+        if freq[1] == 0: mo11 = (mo11, mo11.conj())
+        if freq[2] == 0: mo12 = (mo12, mo12.conj())
+        
+        beta = -lib.einsum('xjl,yli,zji->xyz', f1vv0, mo11[0], mo12[1])
+        beta -= lib.einsum('xjl,zli,yji->xyz', f1vv0, mo12[0], mo11[1])
+        beta -= lib.einsum('yjl,xli,zji->xyz', f1vv1, mo10[0], mo12[1])
+        beta -= lib.einsum('yjl,zli,xji->xyz', f1vv1, mo12[0], mo10[1])
+        beta -= lib.einsum('zjl,xli,yji->xyz', f1vv2, mo10[0], mo11[1])
+        beta -= lib.einsum('zjl,yli,xji->xyz', f1vv2, mo11[0], mo10[1])
+        beta += lib.einsum('xik,yji,zjk->xyz', f1oo0, mo11[0], mo12[1])
+        beta += lib.einsum('xik,zji,yjk->xyz', f1oo0, mo12[0], mo11[1])
+        beta += lib.einsum('yik,xji,zjk->xyz', f1oo1, mo10[0], mo12[1])
+        beta += lib.einsum('yik,zji,xjk->xyz', f1oo1, mo12[0], mo10[1])
+        beta += lib.einsum('zik,xji,yjk->xyz', f1oo2, mo10[0], mo11[1])
+        beta += lib.einsum('zik,yji,xjk->xyz', f1oo2, mo11[0], mo10[1])
+        
+        if freq[0] == 0:
+            mo10 = mo10[0]
+        else:
+            try: mo2 = pl.mo2[freq[1:]]
+            except KeyError: mo2 = pl.solve_mo2(freq[1:], **kwargs)
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
+            mo2[0] *= -1
+            beta += lib.einsum('syzji,sxji->xyz', mo2, mo10[[1,0]]) * freq[0]
+        if freq[1] == 0:
+            mo11 = mo11[0]
+        else:
+            try: mo2 = pl.mo2[(freq[0],freq[2])]
+            except KeyError: mo2 = pl.solve_mo2((freq[0],freq[2]), **kwargs)
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
+            mo2[0] *= -1
+            beta += lib.einsum('sxzji,syji->xyz', mo2, mo11[[1,0]]) * freq[1]
+        if freq[2] == 0:
+            mo12 = mo12[0]
+        else:
+            try: mo2 = pl.mo2[freq[:-1]]
+            except KeyError: mo2 = pl.solve_mo2(freq[:-1], **kwargs)
+            mo2 = mo2[...,mf.mo_occ==0,:]
+            mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
+            mo2[0] *= -1
+            beta += lib.einsum('sxyji,szji->xyz', mo2, mo12[[1,0]]) * freq[2]
+        
         if isinstance(mf, hf.KohnShamDFT):
+            mol = mf.mol
             ni = mf._numint
             ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
+            col = ni.collinear
             xctype = ni._xc_type(mf.xc)
-            dm = mf.make_rdm1()
-            dm1 = polobj.get_dm1(mo1=mo1)
-            dm1_p1o = polobj.get_dm1(mo1=mo1_1o)
-            dm1_m1o = dm1_p1o.transpose(0,2,1).conj()
+            dm0 = mf.make_rdm1()
+            dm10 = pl.get_dm1(mo10, freq[0])
+            dm11 = pl.get_dm1(mo11, freq[1])
+            dm12 = pl.get_dm1(mo12, freq[2])
+            nao = dm0.shape[-1]
+            cur_mem = lib.current_memory()[0]
+            max_memory = max(2000, mf.max_memory*.8 - cur_mem)
 
             if xctype == 'LDA':
-                if isinstance(mf, x2c.SCF):
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords, with_s=False)
+                if isinstance(mf, DKS):
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory,
+                                               with_s=True)
                 else:
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords)
-                rho = ni.eval_rho(mf.mol, ao, dm, xctype=xctype).real
-                rho1 = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype),
-                                            ni.collinear) for dmx in dm1])
-                rho1 = rho1[:,:,None,:] # reshape to match kxc
-                rho1_m1o = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype),
-                                                ni.collinear) for dmx in dm1_m1o])
-                rho1_m1o = rho1_m1o[:,:,None,:] # reshape to match kxc
-                rho1_p1o = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype),
-                                                ni.collinear) for dmx in dm1_p1o])
-                rho1_p1o = rho1_p1o[:,:,None,:] # reshape to match kxc
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory)
                 
+                if col[0] == 'm': 
+                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
+                else:
+                    eval_xc = ni.eval_xc_eff
+                
+                for ao, mask, weight, coords in block_loop:
+                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype, hermi=1).real
+                    rho10 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                         hermi=freq[0]==0), col) for dm in dm10])
+                    rho11 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                         hermi=freq[1]==0), col) for dm in dm11])
+                    rho12 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                         hermi=freq[2]==0), col) for dm in dm12])
+                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3]
+                    kxc = kxc[:,0,:,0,:,0] * weight
+                    beta -= lib.einsum('xag,ybg,zcg,abcg->xyz', rho10, rho11, rho12, kxc)
+            
             elif xctype == 'GGA' or 'MGGA':
-                if isinstance(mf, x2c.SCF):
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords, deriv=1, with_s=False)
+                if isinstance(mf, DKS):
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory,
+                                               with_s=True)
                 else:
-                    ao = ni.eval_ao(mf.mol, mf.grids.coords, deriv=1)
-                rho = ni.eval_rho(mf.mol, ao, dm, xctype=xctype, with_lapl=False).real
-                rho1 = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
-                                                        with_lapl=False),
-                                            ni.collinear) for dmx in dm1])
-                rho1_m1o = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
-                                                            with_lapl=False),
-                                                ni.collinear) for dmx in dm1_m1o])
-                rho1_p1o = numpy.stack([rho_eff(ni.eval_rho(mf.mol, ao, dmx, xctype=xctype,
-                                                            with_lapl=False),
-                                                ni.collinear) for dmx in dm1_p1o])
-            
-            else:
-                raise RuntimeError(f"Unknown xctype '{xctype}'")
-            
-            if ni.collinear[0] == 'm': 
-                eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
-            else:
-                eval_xc = ni.eval_xc_eff
-            
-            kxc = eval_xc(mf.xc, rho, deriv=3)[3] * mf.grids.weights
-            beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz', rho1_m1o, rho1_p1o, rho1, kxc)
-        
-        if type.upper() == 'EOPE':
-            if mf.verbose >= logger.INFO:
-                log.debug(f'{type} hyperpolarizability tensor beta({-freq};{freq},0)')
-                log.debug(f'{beta}')
-        
-        if type.upper() == 'OR':
-            if mf.verbose >= logger.INFO:
-                log.debug(f'{type} hyperpolarizability tensor beta(0;{freq},{-freq})')
-                log.debug(f'{beta.transpose(2,1,0)}')
+                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory)
                 
-            beta = beta.transpose(2,1,0)
-        
-    else:
-        raise NotImplementedError(f'{type}')
+                if col[0] == 'm': 
+                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
+                else:
+                    eval_xc = ni.eval_xc_eff
+                
+                for ao, mask, weight, coords in block_loop:
+                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
+                                       hermi=1, with_lapl=False).real
+                    rho10 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                         hermi=freq[0]==0, with_lapl=False), col)
+                                         for dm in dm10])
+                    rho11 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                         hermi=freq[1]==0, with_lapl=False), col)
+                                         for dm in dm11])
+                    rho12 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                         hermi=freq[2]==0, with_lapl=False), col)
+                                         for dm in dm12])
+                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
+                    beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz',
+                                       rho10, rho11, rho12, kxc)
+            
+            elif xctype == 'HF':
+                pass
+
+            else:
+                raise NotImplementedError(xctype)
+
+    if mf.verbose >= logger.INFO:
+        log.debug(f'Hyperpolarizability tensor b{freq}')
+        log.debug(f'{beta}')
     
     return beta.real
 
 def _dirac_relation(mat):
-    '''Make a tensor product --- sprsp = is prp + I2 prp'''
-    quaternion = numpy.vstack([1j * lib.PauliMatrices, numpy.eye(2)[None,:,:]])
-    qshape = quaternion.shape
-    mshape = mat.shape
-    return lib.einsum('sxy,aspq->axpyq', quaternion, mat).reshape(mshape[0],
-                                                                  qshape[1]*mshape[2],
-                                                                  qshape[2]*mshape[3])
+    '''Make a tensor product --- sprsp = is prp + I2 prp.
+       np.einsum performs better than np.kron in most cases.'''
+    quaternion = numpy.vstack([1j * lib.PauliMatrices, numpy.eye(2)[None]])
+    qshape = quaternion.shape # shape: (4,2,2)
+    mshape = mat.shape # shape: (3,4,nao,nao)
+    tenpro = lib.einsum('sij,xspq->xipjq', quaternion, mat)
+    return tenpro.reshape(mshape[0], qshape[1]*mshape[2], qshape[2]*mshape[3])
 
 
-class Polarizability(rhf.Polarizability):
-    @lib.with_doc(get_dm1.__doc__)
-    def get_dm1(self, freq=None, mo1=None, picture_change=True, solver='krylov'):
-        if freq is None: freq = 0
-        if mo1 is None: mo1 = self.get_mo1(freq, picture_change, solver)
-        return get_dm1(self, mo1)
-    
-    get_h1 = get_h1
+class GHFPolar(RHFPolar):
+    def get_h1(self, picture_change=True, **kwargs):
+        '''The dipole matrix in AO basis.'''
+        mf = self.mf
+        mol = mf.mol
+        charges = mol.atom_charges()
+        coords  = mol.atom_coords()
+        charge_center = lib.einsum('i,ix->x', charges, coords) / charges.sum()
+        with mol.with_common_orig(charge_center):
+            if isinstance(mf, x2c.X2C1E_GSCF) and picture_change:
+                xmol = mf.with_x2c.get_xmol()[0]
+                nao = xmol.nao
+                ao_dip = xmol.intor_symmetric('int1e_r')
+                ao_dip = lib.einsum('ij,xpq->xipjq', numpy.eye(2), ao_dip)
+                ao_dip = ao_dip.reshape(3,2*nao,2*nao)
+                prp = xmol.intor_symmetric('int1e_sprsp').reshape(3,4,nao,nao)
+                prp = _dirac_relation(prp)
+                c = lib.param.LIGHT_SPEED
+                ao_dip = mf.with_x2c.picture_change((ao_dip, prp/(2*c)**2))
+            else:
+                ao_dip = mol.intor_symmetric('int1e_r', comp=3)
+                nao = ao_dip.shape[-1]
+                ao_dip = lib.einsum('ij,xpq->xipjq', numpy.eye(2), ao_dip)
+                ao_dip = ao_dip.reshape(3,2*nao,2*nao)
+        return -ao_dip
 
-    polarizability = polarizability
-    hyperpolarizability = hyperpolarizability
+    hyperpolar = hyperpolarizability = hyperpolarizability
 
+ghf.GHF.Polarizability = lib.class_as_method(GHFPolar)
 
-ghf.GHF.Polarizability = x2c.X2C1E_GSCF.Polarizability = lib.class_as_method(Polarizability)
-    
 
 if __name__ == '__main__':
-    import warnings
-    warnings.filterwarnings('ignore')
-    
+    # static polarizabilities computed via analytical gradient vs. finite field
     from pyscf import gto
-    mol = gto.M(atom ='''O     0.000000     0.000000     0.123323
-                         H     0.000000     0.757497    -0.493291
-                         H     0.000000    -0.757497    -0.493291''',
-                #charge = 1,
-                #spin = 1,
-                basis = 'ccpvdz')
+    mol = gto.M(atom = '''H    0.   0.   0.
+                          F    0.   0.   0.917''')
+
+    mf = mol.GHF().run(conv_tol=1e-14)
+    hcore = mf.get_hcore()
+    pl = GHFPolar(mf)
+    h1 = pl.get_h1()
+    polar = pl.polar()
+    hyperpolar = pl.hyperpolar()
     
-    xc = 'TPSS'
-    '''
-    mf1 = mol.GHF()
-    mf1.conv_tol = 1e-11
-    mf1.kernel()
-    polar1 = Polarizability(mf1)
-    #polar1.conv_tol = 1e-11
-    print(polar1.polarizability())
-    print(polar1.hyper_polarizability())
-    '''
-    mfg = mol.GKS()
-    mfg.xc = xc
-    mfg.conv_tol = 1e-11
-    mfg.kernel()
-    plg = Polarizability(mfg)
-    print(plg.polarizability())
-
-    mfg.collinear = 'mcol'
-    mfg.kernel()
-    plgm = Polarizability(mfg)
-    print(plgm.polarizability())
-
-    mfx = mol.GKS().x2c()
-    mfx.xc = xc
-    mfx.conv_tol = 1e-11
-    mfx.kernel()
-    plx = Polarizability(mfx)
-    print(plx.polarizability())
-
-    mfx.collinear = 'mcol'
-    mfx.kernel()
-    plxm = Polarizability(mfx)
-    print(plxm.polarizability())
+    def apply_E(E):
+        mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
+        mf.run(conv_tol=1e-14)
+        return -mf.dip_moment(mol, mf.make_rdm1(), unit_symbol='AU', verbose=0)
+    print(polar)
+    e1 = apply_E([ 0.0001, 0, 0])
+    e2 = apply_E([-0.0001, 0, 0])
+    print((e1 - e2) / 0.0002)
+    e1 = apply_E([ 0, 0.0001, 0])
+    e2 = apply_E([ 0,-0.0001, 0])
+    print((e1 - e2) / 0.0002)
+    e1 = apply_E([ 0, 0, 0.0001])
+    e2 = apply_E([ 0, 0,-0.0001])
+    print((e1 - e2) / 0.0002)
+    
+    def apply_E(E):
+        mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
+        mf.run(conv_tol=1e-14)
+        return GHFPolar(mf).polarizability()
+    print(hyperpolar)
+    e1 = apply_E([ 0.0001, 0, 0])
+    e2 = apply_E([-0.0001, 0, 0])
+    print((e1 - e2) / 0.0002)
+    e1 = apply_E([ 0, 0.0001, 0])
+    e2 = apply_E([ 0,-0.0001, 0])
+    print((e1 - e2) / 0.0002)
+    e1 = apply_E([ 0, 0, 0.0001])
+    e2 = apply_E([ 0, 0,-0.0001])
+    print((e1 - e2) / 0.0002)

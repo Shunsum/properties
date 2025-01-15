@@ -63,68 +63,71 @@ class CPHFBase(lib.StreamObject):
         occidx = mf.mo_occ > 0
         orbv = mo_coeff[:,~occidx]
         orbo = mo_coeff[:, occidx]
-        dm22 = dm21 = 0
+        dm2 = 0
 
-        if freq == (0,0) and (mo2 is None or mo2.ndim == 4): # D(0,0)
+        if freq == (0,0) and (mo2 is None or mo2.ndim == 3): # D(0,0)
             if with_mo2:
                 if mo2.shape[-2] == orbv.shape[-1]:
-                    dm22 = lib.einsum('pj,xyji,qi->xypq', orbv, mo2, orbo.conj())
+                    dm22 = lib.einsum('pj,xji,qi->xpq', orbv, mo2, orbo.conj())
                 elif mo2.shape[-2] == orbo.shape[-1]:
-                    dm22 = lib.einsum('pj,xyji,qi->xypq', orbo, mo2, orbo.conj())
+                    dm22 = lib.einsum('pj,xji,qi->xpq', orbo, mo2, orbo.conj())
                 else:
-                    dm22 = lib.einsum('pj,xyji,qi->xypq', mo_coeff, mo2, orbo.conj())
+                    dm22 = lib.einsum('pj,xji,qi->xpq', mo_coeff, mo2, orbo.conj())
+                dm2 += dm22
+            
             if with_mo1:
                 try: mo1 = self.mo1[0]
                 except KeyError: mo1 = self.solve_mo1(freq=0, **kwargs)
                 if self.with_s1: # mo1.shape = (3,ntot,nocc)
-                    dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff, mo1, mo1.conj(),
-                                                             mo_coeff.conj())
+                    dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff,
+                                      mo1, mo1.conj(), mo_coeff.conj())
                 else:            # mo1.shape = (3,nvir,nocc)
-                    dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv, mo1, mo1.conj(),
-                                                             orbv.conj())
-            dm2 = dm22 + dm21
-            try: dm2 += dm2.swapaxes(-2,-1).conj()
+                    dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv,
+                                      mo1, mo1.conj(), orbv.conj())
+                dm2 += dm21.reshape(9,*dm21.shape[-2:])
+            
+            try: dm2 += dm2.transpose(0,2,1).conj()
             except SyntaxError: pass
         
         else: # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
             if with_mo2:
                 if mo2.shape[-2] == orbv.shape[-1]:
-                    if mo2.ndim == 4: # used for Krylov solver
-                        dm22 = lib.einsum('pj,xji,qi->xpq', orbv, mo2[0], orbo.conj())
-                        dm22+= lib.einsum('pi,xji,qj->xpq', orbo, mo2[1], orbv.conj())
-                    else:
-                        dm22 = lib.einsum('pj,xyji,qi->xypq', orbv, mo2[0], orbo.conj())
-                        dm22+= lib.einsum('pi,xyji,qj->xypq', orbo, mo2[1], orbv.conj())
+                    dm22 = lib.einsum('pj,xji,qi->xpq', orbv, mo2[0], orbo.conj())
+                    dm22+= lib.einsum('pi,xji,qj->xpq', orbo, mo2[1], orbv.conj())
                 elif mo2.shape[-2] == orbo.shape[-1]:
-                    dm22 = lib.einsum('pj,xyji,qi->xypq', orbo, mo2[0], orbo.conj())
-                    dm22+= lib.einsum('pi,xyji,qj->xypq', orbo, mo2[1], orbo.conj())
+                    dm22 = lib.einsum('pj,xji,qi->xpq', orbo, mo2[0], orbo.conj())
+                    dm22+= lib.einsum('pi,xji,qj->xpq', orbo, mo2[1], orbo.conj())
                 else:
-                    dm22 = lib.einsum('pj,xyji,qi->xypq', mo_coeff, mo2[0], orbo.conj())
-                    dm22+= lib.einsum('pi,xyji,qj->xypq', orbo, mo2[1], mo_coeff.conj())
+                    dm22 = lib.einsum('pj,xji,qi->xpq', mo_coeff, mo2[0], orbo.conj())
+                    dm22+= lib.einsum('pi,xji,qj->xpq', orbo, mo2[1], mo_coeff.conj())
+                dm2 += dm22
+            
             if with_mo1:
                 if freq[0] == freq[1]: # D(w,w)
                     try: mo1 = self.mo1[freq[0]]
                     except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
                     if self.with_s1:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
-                                          mo_coeff, mo1[0], mo1[1], mo_coeff.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff,
+                                          mo1[0], mo1[1], mo_coeff.conj())
                     else:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
-                                          orbv, mo1[0], mo1[1], orbv.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv,
+                                          mo1[0], mo1[1], orbv.conj())
                     dm21 += dm21.transpose(1,0,2,3)
+                
                 elif freq[0] == -freq[1]: # D(w,-w)
                     try: mo1 = self.mo1[freq[0]]
                     except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
                     if self.with_s1:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
-                                          mo_coeff, mo1[0], mo1[0].conj(), mo_coeff.conj())
-                        dm21+= lib.einsum('pj,xki,yji,qk->xypq',
-                                          mo_coeff, mo1[1], mo1[1].conj(), mo_coeff.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff,
+                                          mo1[0], mo1[0].conj(), mo_coeff.conj())
+                        dm21+= lib.einsum('pj,xki,yji,qk->xypq', mo_coeff,
+                                          mo1[1], mo1[1].conj(), mo_coeff.conj())
                     else:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
-                                          orbv, mo1[0], mo1[0].conj(), orbv.conj())
-                        dm21+= lib.einsum('pj,xki,yji,qk->xypq',
-                                          orbv, mo1[1], mo1[1].conj(), orbv.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv,
+                                          mo1[0], mo1[0].conj(), orbv.conj())
+                        dm21+= lib.einsum('pj,xki,yji,qk->xypq', orbv,
+                                          mo1[1], mo1[1].conj(), orbv.conj())
+                
                 elif 0 in freq: # D(0,w) / D(w,0)
                     w = freq[0] if freq[0] != 0 else freq[1]
                     try: mo10 = self.mo1[0]
@@ -132,16 +135,17 @@ class CPHFBase(lib.StreamObject):
                     try: mo11 = self.mo1[w]
                     except KeyError: mo11 = self.solve_mo1(freq=w, **kwargs)
                     if self.with_s1:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
-                                          mo_coeff, mo10, mo11[1], mo_coeff.conj())
-                        dm21+= lib.einsum('pk,xji,yki,qj->xypq',
-                                          mo_coeff, mo10.conj(), mo11[0], mo_coeff.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff,
+                                          mo10, mo11[1], mo_coeff.conj())
+                        dm21+= lib.einsum('pk,xji,yki,qj->xypq', mo_coeff,
+                                          mo10.conj(), mo11[0], mo_coeff.conj())
                     else:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
-                                          orbv, mo10, mo11[1], orbv.conj())
-                        dm21+= lib.einsum('pk,xji,yki,qj->xypq',
-                                          orbv, mo10.conj(), mo11[0], orbv.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv,
+                                          mo10, mo11[1], orbv.conj())
+                        dm21+= lib.einsum('pk,xji,yki,qj->xypq', orbv,
+                                          mo10.conj(), mo11[0], orbv.conj())
                     if freq.index(0) == 1: dm21 = dm21.transpose(1,0,2,3)
+                
                 else: # D(w1,w2)
                     w0 = freq[0]
                     w1 = freq[1]
@@ -150,16 +154,17 @@ class CPHFBase(lib.StreamObject):
                     try: mo11 = self.mo1[w1]
                     except KeyError: mo11 = self.solve_mo1(freq=w1, **kwargs)
                     if self.with_s1:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
-                                          mo_coeff, mo10[0], mo11[1], mo_coeff.conj())
-                        dm21+= lib.einsum('pk,xji,yki,qj->xypq',
-                                          mo_coeff, mo10[1], mo11[0], mo_coeff.conj())
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', mo_coeff,
+                                          mo10[0], mo11[1], mo_coeff.conj())
+                        dm21+= lib.einsum('pk,xji,yki,qj->xypq', mo_coeff,
+                                          mo10[1], mo11[0], mo_coeff.conj())
                     else:
-                        dm21 = lib.einsum('pj,xji,yki,qk->xypq',
-                                          orbv, mo10[0], mo11[1], orbv.conj())
-                        dm21+= lib.einsum('pk,xji,yki,qj->xypq',
-                                          orbv, mo10[1], mo11[0], orbv.conj())
-            dm2 = dm22 + dm21
+                        dm21 = lib.einsum('pj,xji,yki,qk->xypq', orbv,
+                                          mo10[0], mo11[1], orbv.conj())
+                        dm21+= lib.einsum('pk,xji,yki,qj->xypq', orbv,
+                                          mo10[1], mo11[0], orbv.conj())
+                
+                dm2 += dm21.reshape(9,*dm21.shape[-2:])
         
         return dm2*2 if isinstance(mf, hf.RHF) else dm2
 
@@ -238,6 +243,8 @@ class CPHFBase(lib.StreamObject):
             try: mo2 = self.mo2[freq]
             except KeyError: mo2 = self.solve_mo2(freq=freq, **kwargs)
         f2 = self.get_vind(mo2, freq, with_mo2=with_mo2, **kwargs)
+        if isinstance(self.mf, hf.KohnShamDFT):
+            pass
         if hasattr(self, 'get_h2'):
             f2 += self.get_h2(**kwargs)
         if self.with_s1:
@@ -250,26 +257,26 @@ class CPHFBase(lib.StreamObject):
             D^(0)(\ \ | \ \)^(2)'''
         mf = self.mf
         nao = mf.mo_coeff.shape[-2]
-        return numpy.zeros((3,nao,nao))
+        return numpy.zeros((9,nao,nao))
     
     def get_jk11(self, freq):
         r'''The second-order JK wrt the external magnetic field.
             D^(1)(\ \ | \ \)^(1)'''
         mf = self.mf
         nao = mf.mo_coeff.shape[-2]
-        return numpy.zeros((3,3,nao,nao))
+        return numpy.zeros((9,nao,nao))
     
     def get_s2(self):
         '''The second-order overlap matrix in AO basis.'''
         mf = self.mf
         nao = mf.mo_coeff.shape[-2]
-        return numpy.zeros((3,3,nao,nao))
+        return numpy.zeros((9,nao,nao))
     
     def get_t2(self, freq):
-        r'''( \mu | \partial_t | \nu )^(2).'''
+        r'''( \mu | i\partial_t | \nu )^(2).'''
         mf = self.mf
         nao = mf.mo_coeff.shape[-2]
-        return numpy.zeros((3,3,nao,nao))
+        return numpy.zeros((9,nao,nao))
 
     def get_e0vo(self):
         '''e0vo = e0v - e0o.'''
@@ -345,6 +352,8 @@ class CPHFBase(lib.StreamObject):
                 mo2oo += us + s2*.5
             mo2oo += mo2oo.transpose(1,0,2,3)
             mo2oo *= -.5
+            mo2oo = mo2oo.reshape(9,*mo2oo.shape[-2:])
+        
         else:
             if freq[0] == freq[1]: # U(w,w)
                 try: mo1 = self.mo1[freq[0]]
@@ -357,6 +366,7 @@ class CPHFBase(lib.StreamObject):
                     us+= lib.einsum('xjk,yji->xyik', mo1[0], s1.conj())
                     mo2oo += us + s2*.5
                 mo2oo += mo2oo.transpose(1,0,2,3)
+            
             elif freq[0] == -freq[1]: # U(w,-w)
                 try: mo1 = self.mo1[freq[0]]
                 except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
@@ -369,6 +379,7 @@ class CPHFBase(lib.StreamObject):
                     us+= lib.einsum('xjk,yji->xyik', mo1[0], s1.conj())
                     us+= us.transpose(1,0,3,2).conj()
                     mo2oo += us + s2
+            
             elif 0 in freq: # U(0,w) / U(w,0)
                 w = freq[0] if freq[0] != 0 else freq[1]
                 try: mo10 = self.mo1[0]
@@ -386,6 +397,7 @@ class CPHFBase(lib.StreamObject):
                     us+= lib.einsum('xjk,yji->xyik', s1, mo11[1])
                     mo2oo += us + s2
                 if freq.index(0) == 1: mo2oo = mo2oo.transpose(1,0,2,3)
+            
             else: # U(w1,w2)
                 w0 = freq[0]
                 w1 = freq[1]
@@ -403,7 +415,10 @@ class CPHFBase(lib.StreamObject):
                     us+= lib.einsum('xji,yjk->xyik', s1.conj(), mo11[0])
                     us+= lib.einsum('xjk,yji->xyik', s1, mo11[1])
                     mo2oo += us + s2
-            mo2oo = numpy.array((mo2oo, mo2oo.transpose(0,1,3,2))) * -.5
+            
+            mo2oo = mo2oo.reshape(9,*mo2oo.shape[-2:])
+            mo2oo = numpy.array((mo2oo, mo2oo.transpose(0,2,1))) * -.5
+        
         return mo2oo
 
     def _rhs1(self, freq=0, **kwargs):
@@ -441,6 +456,7 @@ class CPHFBase(lib.StreamObject):
                 s1 = self.get_s1()
                 s1vt = self._to_vt(s1)
 
+                rhs += self._to_vo(self.get_s2()) * e0
                 sym = lib.einsum('xjk,yki->xyji', self._to_vo(s1), e1)
                 if freq[0] != 0:
                     mo1 = mo1[0]
@@ -452,14 +468,14 @@ class CPHFBase(lib.StreamObject):
                 sym -= lib.einsum('xjl,yli->xyji', self._to_vt(f1), mo1)
                 sym += lib.einsum('xjk,yki->xyji', mo1[:,~occidx], e1)
                 sym += sym.transpose(1,0,2,3)
-                rhs += sym + self._to_vo(self.get_s2()) * e0
+                rhs += sym.reshape(9,*sym.shape[-2:])
             else:
                 if freq[0] != 0:
                     mo1 = mo1[0]
                 sym = -lib.einsum('xjl,yli->xyji', self._to_vv(f1), mo1)
                 sym += lib.einsum('xjk,yki->xyji', mo1, e1)
                 sym += sym.transpose(1,0,2,3)
-                rhs += sym
+                rhs += sym.reshape(9,*sym.shape[-2:])
 
         elif freq[0] == -freq[1]:
             try: mo1 = self.mo1[freq[0]]
@@ -479,26 +495,27 @@ class CPHFBase(lib.StreamObject):
                 t1vt = self._to_vt(self.get_t1(freq[0]))
                 
                 rhs += self._to_vo(self.get_s2()) * e0
-                rhs += lib.einsum('xjl,yli,i->xyji', s1vt, mo1[1], e0)
-                rhs += lib.einsum('yjl,xli,i->xyji', s1vt, mo1[0], e0)
-                rhs += lib.einsum('xjk,yki->xyji', s1vo, e1m)
-                rhs += lib.einsum('yjk,xki->xyji', s1vo, e1p)
+                tmp  = lib.einsum('xjl,yli,i->xyji', s1vt, mo1[1], e0)
+                tmp += lib.einsum('yjl,xli,i->xyji', s1vt, mo1[0], e0)
+                tmp += lib.einsum('xjk,yki->xyji', s1vo, e1m)
+                tmp += lib.einsum('yjk,xki->xyji', s1vo, e1p)
 
-                rhs -= lib.einsum('xjl,yli->xyji', s1vt, mo1[1]) * freq[1]
-                rhs -= lib.einsum('yjl,xli->xyji', s1vt, mo1[0]) * freq[0]
-                rhs += lib.einsum('xjl,yli->xyji', t1vt, mo1[1])
-                rhs -= lib.einsum('yjl,xli->xyji', t1vt, mo1[0])
                 rhs += self._to_vo(self.get_t2(freq))
+                tmp -= lib.einsum('xjl,yli->xyji', s1vt, mo1[1]) * freq[1]
+                tmp -= lib.einsum('yjl,xli->xyji', s1vt, mo1[0]) * freq[0]
+                tmp += lib.einsum('xjl,yli->xyji', t1vt, mo1[1])
+                tmp -= lib.einsum('yjl,xli->xyji', t1vt, mo1[0])
 
-                rhs -= lib.einsum('xjl,yli->xyji', self._to_vt(f1p), mo1[1])
-                rhs -= lib.einsum('yjl,xli->xyji', self._to_vt(f1m), mo1[0])
-                rhs += lib.einsum('xjk,yki->xyji', mo1[0,:,~occidx], e1m)
-                rhs += lib.einsum('yjk,xki->xyji', mo1[1,:,~occidx], e1p)
+                tmp -= lib.einsum('xjl,yli->xyji', self._to_vt(f1p), mo1[1])
+                tmp -= lib.einsum('yjl,xli->xyji', self._to_vt(f1m), mo1[0])
+                tmp += lib.einsum('xjk,yki->xyji', mo1[0,:,~occidx], e1m)
+                tmp += lib.einsum('yjk,xki->xyji', mo1[1,:,~occidx], e1p)
             else:
-                rhs -= lib.einsum('xjl,yli->xyji', self._to_vv(f1p), mo1[1])
-                rhs -= lib.einsum('yjl,xli->xyji', self._to_vv(f1m), mo1[0])
-                rhs += lib.einsum('xjk,yki->xyji', mo1[0], e1m)
-                rhs += lib.einsum('yjk,xki->xyji', mo1[1], e1p)
+                tmp = -lib.einsum('xjl,yli->xyji', self._to_vv(f1p), mo1[1])
+                tmp -= lib.einsum('yjl,xli->xyji', self._to_vv(f1m), mo1[0])
+                tmp += lib.einsum('xjk,yki->xyji', mo1[0], e1m)
+                tmp += lib.einsum('yjk,xki->xyji', mo1[1], e1p)
+            rhs += tmp.reshape(9,*tmp.shape[-2:])
                 
         elif 0 in freq:
             w = freq[0] if freq[0] != 0 else freq[1]
@@ -520,15 +537,15 @@ class CPHFBase(lib.StreamObject):
                 s1vo = self._to_vo(s1)
                 t1vt = self._to_vt(self.get_t1(freq=w))
                 
-                tmp = self._to_vo(self.get_s2()) * e0
-                tmp += lib.einsum('xjl,yli,i->xyji', s1vt, mo11, e0)
+                tmp  = lib.einsum('xjl,yli,i->xyji', s1vt, mo11, e0)
                 tmp += lib.einsum('yjl,xli,i->xyji', s1vt, mo10, e0)
                 tmp += lib.einsum('xjk,yki->xyji', s1vo, e11)
                 tmp += lib.einsum('yjk,xki->xyji', s1vo, e10)
 
+                rhs += self._to_vo(self.get_s2()) * e0
+                rhs += self._to_vo(self.get_t2(freq))
                 tmp -= lib.einsum('xjl,yli->xyji', s1vt, mo11) * w
                 tmp += lib.einsum('yjl,xli->xyji', t1vt, mo10)
-                tmp += self._to_vo(self.get_t2(freq=(0,w)))
 
                 tmp -= lib.einsum('xjl,yli->xyji', self._to_vt(f10), mo11)
                 tmp -= lib.einsum('yjl,xli->xyji', self._to_vt(f11), mo10)
@@ -539,7 +556,11 @@ class CPHFBase(lib.StreamObject):
                 tmp -= lib.einsum('yjl,xli->xyji', self._to_vv(f11), mo10)
                 tmp += lib.einsum('xjk,yki->xyji', mo10, e11)
                 tmp += lib.einsum('yjk,xki->xyji', mo11, e10)
-            rhs += tmp.transpose(1,0,2,3) if freq.index(0) == 1 else tmp
+            
+            if freq.index(0) == 1:
+                rhs += tmp.transpose(1,0,2,3).reshape(9,*tmp.shape[-2:])
+            else:
+                rhs += tmp.reshape(9,*tmp.shape[-2:])
 
         else:
             w0 = freq[0]
@@ -564,17 +585,17 @@ class CPHFBase(lib.StreamObject):
                 t10 = self.get_t1(freq=w0)
                 t11 = self.get_t1(freq=w1)
                 
-                tmp = self._to_vo(self.get_s2()) * e0
-                tmp += lib.einsum('xjl,yli,i->xyji', s1vt, mo11, e0)
+                rhs += self._to_vo(self.get_s2()) * e0
+                tmp  = lib.einsum('xjl,yli,i->xyji', s1vt, mo11, e0)
                 tmp += lib.einsum('yjl,xli,i->xyji', s1vt, mo10, e0)
                 tmp += lib.einsum('xjk,yki->xyji', s1vo, e11)
                 tmp += lib.einsum('yjk,xki->xyji', s1vo, e10)
 
+                rhs += self._to_vo(self.get_t2(freq))
                 tmp -= lib.einsum('xjl,yli->xyji', s1vt, mo11) * w1
                 tmp -= lib.einsum('yjl,xli->xyji', s1vt, mo10) * w0
                 tmp += lib.einsum('xjl,yli->xyji', self._to_vt(t10), mo11)
                 tmp += lib.einsum('yjl,xli->xyji', self._to_vt(t11), mo10)
-                tmp += self._to_vo(self.get_t2(freq))
 
                 tmp -= lib.einsum('xjl,yli->xyji', self._to_vt(f10), mo11)
                 tmp -= lib.einsum('yjl,xli->xyji', self._to_vt(f11), mo10)
@@ -585,7 +606,7 @@ class CPHFBase(lib.StreamObject):
                 tmp -= lib.einsum('yjl,xli->xyji', self._to_vv(f11), mo10)
                 tmp += lib.einsum('xjk,yki->xyji', mo10, e11)
                 tmp += lib.einsum('yjk,xki->xyji', mo11, e10)
-            rhs += tmp
+            rhs += tmp.reshape(9,*tmp.shape[-2:])
         
         return rhs
 
@@ -621,7 +642,7 @@ class CPHFBase(lib.StreamObject):
                     mo1 = mo1.reshape(2,3,nvir,nocc)
                     v1 = self.get_vind(mo1, freq, **kwargs)
                     v1p = self._to_vo(v1) # shape: (3,nvir,nocc)
-                    v1m = self._to_vo(v1.swapaxes(-2,-1).conj())
+                    v1m = self._to_vo(v1.transpose(0,2,1).conj())
                     v1p /= (e0vo + freq)
                     v1m /= (e0vo - freq)
                     v1 = numpy.array((v1p, v1m.conj()))
@@ -648,7 +669,7 @@ class CPHFBase(lib.StreamObject):
             
             if freq == (0,0):
                 def lhs(mo2): # U(0,0)
-                    mo2 = mo2.reshape(3,3,nvir,nocc)
+                    mo2 = mo2.reshape(9,nvir,nocc)
                     v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
                     v2 = self._to_vo(v2) / e0vo
                     return v2.ravel()
@@ -658,14 +679,14 @@ class CPHFBase(lib.StreamObject):
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo2 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
                                  tol=self.conv_tol, verbose=log)
-                mo2 = mo2.reshape(3,3,nvir,nocc)
+                mo2 = mo2.reshape(9,nvir,nocc)
             
             else:
                 def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
-                    mo2 = mo2.reshape(2,3,3,nvir,nocc)
+                    mo2 = mo2.reshape(2,9,nvir,nocc)
                     v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
-                    v2p = self._to_vo(v2) # shape: (3,3,nvir,nocc)
-                    v2m = self._to_vo(v2.swapaxes(-2,-1).conj())
+                    v2p = self._to_vo(v2) # shape: (9,nvir,nocc)
+                    v2m = self._to_vo(v2.transpose(0,2,1).conj())
                     v2p /= (e0vo + freq[0] + freq[1])
                     v2m /= (e0vo - freq[0] - freq[1])
                     v2 = numpy.array((v2p, v2m.conj()))
@@ -677,7 +698,7 @@ class CPHFBase(lib.StreamObject):
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo2 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
                                  tol=self.conv_tol, verbose=log)
-                mo2 = mo2.reshape(2,3,3,nvir,nocc)
+                mo2 = mo2.reshape(2,9,nvir,nocc)
             
             mo2 = numpy.concatenate((self._mo2oo(freq, **kwargs), mo2), axis=-2)
 
@@ -706,10 +727,11 @@ class CPHFBase(lib.StreamObject):
 
             else:
                 rhs = numpy.array((rhs, rhs.conj()))
+
                 def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
                     v1 = self.get_vind(mo1, freq, **kwargs)
                     v1p = self._to_vo(v1)
-                    v1m = self._to_vo(v1.swapaxes(-2,-1).conj())
+                    v1m = self._to_vo(v1.transpose(0,2,1).conj())
                     v1p += (e0vo + freq) * mo1[0]
                     v1m += (e0vo - freq) * mo1[1].conj()
                     v1 = numpy.array((v1p, v1m.conj()))
@@ -737,10 +759,11 @@ class CPHFBase(lib.StreamObject):
                 
             else:
                 rhs = numpy.array((rhs, rhs.conj()))
+
                 def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
                     v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
                     v2p = self._to_vo(v2)
-                    v2m = self._to_vo(v2.swapaxes(-2,-1).conj())
+                    v2m = self._to_vo(v2.transpose(0,2,1).conj())
                     v2p += (e0vo + freq[0] + freq[1]) * mo2[0]
                     v2m += (e0vo - freq[0] - freq[1]) * mo2[1].conj()
                     v2 = numpy.array((v2p, v2m.conj()))
@@ -770,20 +793,20 @@ class CPHFBase(lib.StreamObject):
                 mo1 = mo1.reshape(2,1,nvir,nocc)
                 v1 = self.get_vind(mo1, freq, **kwargs)
                 v1p = self._to_vo(v1)
-                v1m = self._to_vo(v1.swapaxes(-2,-1).conj())
+                v1m = self._to_vo(v1.transpose(0,2,1).conj())
                 v1p += (e0vo + freq) * mo1[0]
                 v1m += (e0vo - freq) * mo1[1].conj()
                 v1 = numpy.array((v1p, v1m.conj())) # shape: (2,1,nvir,nocc)
                 return v1.ravel()
         # second-order solver
         elif len(freq) == 2:
-            rhs = self._rhs2(freq, **kwargs).reshape(9,nvir,nocc)
+            rhs = self._rhs2(freq, **kwargs)
             
             def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
-                mo2 = mo2.reshape(2,1,1,nvir,nocc)
+                mo2 = mo2.reshape(2,1,nvir,nocc)
                 v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
                 v2p = self._to_vo(v2)
-                v2m = self._to_vo(v2.swapaxes(-2,-1).conj())
+                v2m = self._to_vo(v2.transpose(0,2,1).conj())
                 v2p += (e0vo + freq[0] + freq[1]) * mo2[0]
                 v2m += (e0vo - freq[0] - freq[1]) * mo2[1].conj()
                 v2 = numpy.array((v2p, v2m.conj()))
@@ -813,7 +836,7 @@ class CPHFBase(lib.StreamObject):
         
         else:
             mo2 = numpy.linalg.solve(operator, rhs.reshape(9,-1).T).T
-            mo2 = mo2.reshape(3,3,2,nvir,nocc).transpose(2,0,1,3,4)
+            mo2 = mo2.reshape(9,2,nvir,nocc).swapaxes(0,1)
             if freq == (0,0): mo2 = mo2[0]
             mo2 = numpy.concatenate((self._mo2oo(freq, **kwargs), mo2), axis=-2)
 
@@ -973,21 +996,24 @@ class UCPHFBase(CPHFBase):
         orboa = mo_coeff[0][:, occidxa]
         orbvb = mo_coeff[1][:,~occidxb]
         orbob = mo_coeff[1][:, occidxb]
-        dm22a = dm21a = 0
-        dm22b = dm21b = 0
+        dm2a = 0
+        dm2b = 0
 
-        if freq == (0,0) and (mo2 is None or mo2[0].ndim == 4): # D(0,0)
+        if freq == (0,0) and (mo2 is None or mo2[0].ndim == 3): # D(0,0)
             if with_mo2:
                 mo2a, mo2b = mo2
                 if mo2a.shape[-2] == orbva.shape[-1]:
-                    dm22a = lib.einsum('pj,xyji,qi->xypq', orbva, mo2a, orboa.conj())
-                    dm22b = lib.einsum('pj,xyji,qi->xypq', orbvb, mo2b, orbob.conj())
+                    dm22a = lib.einsum('pj,xji,qi->xpq', orbva, mo2a, orboa.conj())
+                    dm22b = lib.einsum('pj,xji,qi->xpq', orbvb, mo2b, orbob.conj())
                 elif mo2a.shape[-2] == orboa.shape[-1]:
-                    dm22a = lib.einsum('pj,xyji,qi->xypq', orboa, mo2a, orboa.conj())
-                    dm22b = lib.einsum('pj,xyji,qi->xypq', orbob, mo2b, orbob.conj())
+                    dm22a = lib.einsum('pj,xji,qi->xpq', orboa, mo2a, orboa.conj())
+                    dm22b = lib.einsum('pj,xji,qi->xpq', orbob, mo2b, orbob.conj())
                 else:
-                    dm22a = lib.einsum('pj,xyji,qi->xypq', mo_coeff[0], mo2a, orboa.conj())
-                    dm22b = lib.einsum('pj,xyji,qi->xypq', mo_coeff[1], mo2b, orbob.conj())
+                    dm22a = lib.einsum('pj,xji,qi->xpq', mo_coeff[0], mo2a, orboa.conj())
+                    dm22b = lib.einsum('pj,xji,qi->xpq', mo_coeff[1], mo2b, orbob.conj())
+                dm2a += dm22a
+                dm2b += dm22b
+            
             if with_mo1:
                 try: mo1 = self.mo1[0]
                 except KeyError: mo1 = self.solve_mo1(freq=0, **kwargs)
@@ -1002,37 +1028,39 @@ class UCPHFBase(CPHFBase):
                                        mo1a, mo1a.conj(), orbva.conj())
                     dm21b = lib.einsum('pj,xji,yki,qk->xypq', orbvb,
                                        mo1b, mo1b.conj(), orbvb.conj())
-            dm2a = dm22a + dm21a
-            dm2b = dm22b + dm21b
+                dm2a += dm21a.reshape(9,*dm21a.shape[-2:])
+                dm2b += dm21b.reshape(9,*dm21b.shape[-2:])
+
             try:
-                dm2a += dm2a.swapaxes(-2,-1).conj()
-                dm2b += dm2b.swapaxes(-2,-1).conj()
+                dm2a += dm2a.transpose(0,2,1).conj()
+                dm2b += dm2b.transpose(0,2,1).conj()
             except SyntaxError: pass
         
         else: # mo2s[0] = Us(w1,w2), mo2s[1] = Us*(-w1,-w2)
             if with_mo2:
                 mo2a, mo2b = mo2
                 if mo2a.shape[-2] == orbva.shape[-1]:
-                    if mo2a.ndim == 4: # used for Krylov solver
-                        dm22a = lib.einsum('pj,xji,qi->xpq', orbva, mo2a[0], orboa.conj())
-                        dm22a+= lib.einsum('pi,xji,qj->xpq', orboa, mo2a[1], orbva.conj())
-                        dm22b = lib.einsum('pj,xji,qi->xpq', orbvb, mo2b[0], orbob.conj())
-                        dm22b+= lib.einsum('pi,xji,qj->xpq', orbob, mo2b[1], orbvb.conj())
-                    else:
-                        dm22a = lib.einsum('pj,xyji,qi->xypq', orbva, mo2a[0], orboa.conj())
-                        dm22a+= lib.einsum('pi,xyji,qj->xypq', orboa, mo2a[1], orbva.conj())
-                        dm22b = lib.einsum('pj,xyji,qi->xypq', orbvb, mo2b[0], orbob.conj())
-                        dm22b+= lib.einsum('pi,xyji,qj->xypq', orbob, mo2b[1], orbvb.conj())
+                    dm22a = lib.einsum('pj,xji,qi->xpq', orbva, mo2a[0], orboa.conj())
+                    dm22a+= lib.einsum('pi,xji,qj->xpq', orboa, mo2a[1], orbva.conj())
+                    dm22b = lib.einsum('pj,xji,qi->xpq', orbvb, mo2b[0], orbob.conj())
+                    dm22b+= lib.einsum('pi,xji,qj->xpq', orbob, mo2b[1], orbvb.conj())
                 elif mo2a.shape[-2] == orboa.shape[-1]:
-                    dm22a = lib.einsum('pj,xyji,qi->xypq', orboa, mo2a[0], orboa.conj())
-                    dm22a+= lib.einsum('pi,xyji,qj->xypq', orboa, mo2a[1], orboa.conj())
-                    dm22b = lib.einsum('pj,xyji,qi->xypq', orbob, mo2b[0], orbob.conj())
-                    dm22b+= lib.einsum('pi,xyji,qj->xypq', orbob, mo2b[1], orbob.conj())
+                    dm22a = lib.einsum('pj,xji,qi->xpq', orboa, mo2a[0], orboa.conj())
+                    dm22a+= lib.einsum('pi,xji,qj->xpq', orboa, mo2a[1], orboa.conj())
+                    dm22b = lib.einsum('pj,xji,qi->xpq', orbob, mo2b[0], orbob.conj())
+                    dm22b+= lib.einsum('pi,xji,qj->xpq', orbob, mo2b[1], orbob.conj())
                 else:
-                    dm22a = lib.einsum('pj,xyji,qi->xypq', mo_coeff[0], mo2a[0], orboa.conj())
-                    dm22a+= lib.einsum('pi,xyji,qj->xypq', orboa, mo2a[1], mo_coeff[0].conj())
-                    dm22b = lib.einsum('pj,xyji,qi->xypq', mo_coeff[1], mo2b[0], orbob.conj())
-                    dm22b+= lib.einsum('pi,xyji,qj->xypq', orbob, mo2b[1], mo_coeff[1].conj())
+                    dm22a = lib.einsum('pj,xji,qi->xpq', mo_coeff[0],
+                                       mo2a[0], orboa.conj())
+                    dm22a+= lib.einsum('pi,xji,qj->xpq', orboa,
+                                       mo2a[1], mo_coeff[0].conj())
+                    dm22b = lib.einsum('pj,xji,qi->xpq', mo_coeff[1],
+                                       mo2b[0], orbob.conj())
+                    dm22b+= lib.einsum('pi,xji,qj->xpq', orbob,
+                                       mo2b[1], mo_coeff[1].conj())
+                dm2a += dm22a
+                dm2b += dm22b
+            
             if with_mo1:
                 if freq[0] == freq[1]: # D(w,w)
                     try: mo1 = self.mo1[freq[0]]
@@ -1050,6 +1078,7 @@ class UCPHFBase(CPHFBase):
                                            mo1b[0], mo1b[1], orbvb.conj())
                     dm21a += dm21a.transpose(1,0,2,3)
                     dm21b += dm21b.transpose(1,0,2,3)
+                
                 elif freq[0] == -freq[1]: # D(w,-w)
                     try: mo1 = self.mo1[freq[0]]
                     except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
@@ -1072,6 +1101,7 @@ class UCPHFBase(CPHFBase):
                                            mo1b[0], mo1b[0].conj(), orbvb.conj())
                         dm21b+= lib.einsum('pj,xki,yji,qk->xypq', orbvb,
                                            mo1b[1], mo1b[1].conj(), orbvb.conj())
+                
                 elif 0 in freq: # D(0,w) / D(w,0)
                     w = freq[0] if freq[0] != 0 else freq[1]
                     try: mo10 = self.mo1[0]
@@ -1101,6 +1131,7 @@ class UCPHFBase(CPHFBase):
                     if freq.index(0) == 1:
                         dm21a = dm21a.transpose(1,0,2,3)
                         dm21b = dm21b.transpose(1,0,2,3)
+                
                 else: # D(w1,w2)
                     w0 = freq[0]
                     w1 = freq[1]
@@ -1128,8 +1159,9 @@ class UCPHFBase(CPHFBase):
                                            mo10b[0], mo11b[1], orbvb.conj())
                         dm21b+= lib.einsum('pk,xji,yki,qj->xypq', orbvb,
                                            mo10b[1], mo11b[0], orbvb.conj())
-            dm2a = dm22a + dm21a
-            dm2b = dm22b + dm21b
+                
+                dm2a += dm21a.reshape(9,*dm21a.shape[-2:])
+                dm2b += dm21b.reshape(9,*dm21b.shape[-2:])
         
         return (dm2a, dm2b)
 
@@ -1200,6 +1232,9 @@ class UCPHFBase(CPHFBase):
             mo2oob += mo2oob.transpose(1,0,2,3)
             mo2ooa *= -.5
             mo2oob *= -.5
+            mo2ooa = mo2ooa.reshape(9,*mo2ooa.shape[-2:])
+            mo2oob = mo2oob.reshape(9,*mo2oob.shape[-2:])
+        
         else:
             if freq[0] == freq[1]: # U(w,w)
                 try: mo1 = self.mo1[freq[0]]
@@ -1218,6 +1253,7 @@ class UCPHFBase(CPHFBase):
                     mo2oob += usb + s2b*.5
                 mo2ooa += mo2ooa.transpose(1,0,2,3)
                 mo2oob += mo2oob.transpose(1,0,2,3)
+            
             elif freq[0] == -freq[1]: # U(w,-w)
                 try: mo1 = self.mo1[freq[0]]
                 except KeyError: mo1 = self.solve_mo1(freq=freq[0], **kwargs)
@@ -1237,6 +1273,7 @@ class UCPHFBase(CPHFBase):
                     usb+= usb.transpose(1,0,3,2).conj()
                     mo2ooa += usa + s2a
                     mo2oob += usb + s2b
+            
             elif 0 in freq: # U(0,w) / U(w,0)
                 w = freq[0] if freq[0] != 0 else freq[1]
                 try: mo10 = self.mo1[0]
@@ -1265,6 +1302,7 @@ class UCPHFBase(CPHFBase):
                 if freq.index(0) == 1:
                     mo2ooa = mo2ooa.transpose(1,0,2,3)
                     mo2oob = mo2oob.transpose(1,0,2,3)
+            
             else: # U(w1,w2)
                 w0 = freq[0]
                 w1 = freq[1]
@@ -1291,8 +1329,12 @@ class UCPHFBase(CPHFBase):
                     usb+= lib.einsum('xjk,yji->xyik', s1b, mo11b[1])
                     mo2ooa += usa + s2a
                     mo2oob += usb + s2b
-            mo2ooa = numpy.array((mo2ooa, mo2ooa.transpose(0,1,3,2))) * -.5
-            mo2oob = numpy.array((mo2oob, mo2oob.transpose(0,1,3,2))) * -.5
+            
+            mo2ooa = mo2ooa.reshape(9,*mo2ooa.shape[-2:])
+            mo2oob = mo2oob.reshape(9,*mo2oob.shape[-2:])
+            mo2ooa = numpy.array((mo2ooa, mo2ooa.transpose(0,2,1))) * -.5
+            mo2oob = numpy.array((mo2oob, mo2oob.transpose(0,2,1))) * -.5
+        
         return (mo2ooa, mo2oob)
 
     def _rhs1(self, freq=0, **kwargs):
@@ -1360,8 +1402,8 @@ class UCPHFBase(CPHFBase):
                 symb += lib.einsum('xjk,yki->xyji', mo1b[:,~occidxb], e1b)
                 syma += syma.transpose(1,0,2,3)
                 symb += symb.transpose(1,0,2,3)
-                rhsa += syma + s2voa * e0a
-                rhsb += symb + s2vob * e0b
+                rhsa += syma.reshape(9,*syma.shape[-2:]) + s2voa * e0a
+                rhsb += symb.reshape(9,*symb.shape[-2:]) + s2vob * e0b
             else:
                 if freq[0] != 0:
                     mo1a = mo1a[0]
@@ -1373,8 +1415,8 @@ class UCPHFBase(CPHFBase):
                 symb += lib.einsum('xjk,yki->xyji', mo1b, e1b)
                 syma += syma.transpose(1,0,2,3)
                 symb += symb.transpose(1,0,2,3)
-                rhsa += syma
-                rhsb += symb
+                rhsa += syma.reshape(9,*syma.shape[-2:])
+                rhsb += symb.reshape(9,*symb.shape[-2:])
 
         elif freq[0] == -freq[1]:
             try: mo1 = self.mo1[freq[0]]
@@ -1404,41 +1446,43 @@ class UCPHFBase(CPHFBase):
                 
                 rhsa += s2voa * e0a
                 rhsb += s2vob * e0b
-                rhsa += lib.einsum('xjl,yli,i->xyji', s1vta, mo1a[1], e0a)
-                rhsb += lib.einsum('xjl,yli,i->xyji', s1vtb, mo1b[1], e0b)
-                rhsa += lib.einsum('yjl,xli,i->xyji', s1vta, mo1a[0], e0a)
-                rhsb += lib.einsum('yjl,xli,i->xyji', s1vtb, mo1b[0], e0b)
-                rhsa += lib.einsum('xjk,yki->xyji', s1voa, e1ma)
-                rhsb += lib.einsum('xjk,yki->xyji', s1vob, e1mb)
-                rhsa += lib.einsum('yjk,xki->xyji', s1voa, e1pa)
-                rhsb += lib.einsum('yjk,xki->xyji', s1vob, e1pb)
+                tmpa  = lib.einsum('xjl,yli,i->xyji', s1vta, mo1a[1], e0a)
+                tmpb  = lib.einsum('xjl,yli,i->xyji', s1vtb, mo1b[1], e0b)
+                tmpa += lib.einsum('yjl,xli,i->xyji', s1vta, mo1a[0], e0a)
+                tmpb += lib.einsum('yjl,xli,i->xyji', s1vtb, mo1b[0], e0b)
+                tmpa += lib.einsum('xjk,yki->xyji', s1voa, e1ma)
+                tmpb += lib.einsum('xjk,yki->xyji', s1vob, e1mb)
+                tmpa += lib.einsum('yjk,xki->xyji', s1voa, e1pa)
+                tmpb += lib.einsum('yjk,xki->xyji', s1vob, e1pb)
 
-                rhsa -= lib.einsum('xjl,yli->xyji', s1vta, mo1a[1]) * freq[1]
-                rhsb -= lib.einsum('xjl,yli->xyji', s1vtb, mo1b[1]) * freq[1]
-                rhsa -= lib.einsum('yjl,xli->xyji', s1vta, mo1a[0]) * freq[0]
-                rhsb -= lib.einsum('yjl,xli->xyji', s1vtb, mo1b[0]) * freq[0]
-                rhsa += lib.einsum('xjl,yli->xyji', t1vta, mo1a[1])
-                rhsb += lib.einsum('xjl,yli->xyji', t1vtb, mo1b[1])
-                rhsa -= lib.einsum('yjl,xli->xyji', t1vta, mo1a[0])
-                rhsb -= lib.einsum('yjl,xli->xyji', t1vtb, mo1b[0])
                 rhsa += t2voa
                 rhsb += t2vob
+                tmpa -= lib.einsum('xjl,yli->xyji', s1vta, mo1a[1]) * freq[1]
+                tmpb -= lib.einsum('xjl,yli->xyji', s1vtb, mo1b[1]) * freq[1]
+                tmpa -= lib.einsum('yjl,xli->xyji', s1vta, mo1a[0]) * freq[0]
+                tmpb -= lib.einsum('yjl,xli->xyji', s1vtb, mo1b[0]) * freq[0]
+                tmpa += lib.einsum('xjl,yli->xyji', t1vta, mo1a[1])
+                tmpb += lib.einsum('xjl,yli->xyji', t1vtb, mo1b[1])
+                tmpa -= lib.einsum('yjl,xli->xyji', t1vta, mo1a[0])
+                tmpb -= lib.einsum('yjl,xli->xyji', t1vtb, mo1b[0])
 
-                rhsa += lib.einsum('xjk,yki->xyji', mo1a[0,:,~occidxa], e1ma)
-                rhsb += lib.einsum('xjk,yki->xyji', mo1b[0,:,~occidxb], e1mb)
-                rhsa += lib.einsum('yjk,xki->xyji', mo1a[1,:,~occidxa], e1pa)
-                rhsb += lib.einsum('yjk,xki->xyji', mo1b[1,:,~occidxb], e1pb)
+                tmpa += lib.einsum('xjk,yki->xyji', mo1a[0,:,~occidxa], e1ma)
+                tmpb += lib.einsum('xjk,yki->xyji', mo1b[0,:,~occidxb], e1mb)
+                tmpa += lib.einsum('yjk,xki->xyji', mo1a[1,:,~occidxa], e1pa)
+                tmpb += lib.einsum('yjk,xki->xyji', mo1b[1,:,~occidxb], e1pb)
             else:
                 f1pa, f1pb = self._to_vv(f1p)
                 f1ma, f1mb = self._to_vv(f1m)
-                rhsa += lib.einsum('xjk,yki->xyji', mo1a[0], e1ma)
-                rhsb += lib.einsum('xjk,yki->xyji', mo1b[0], e1mb)
-                rhsa += lib.einsum('yjk,xki->xyji', mo1a[1], e1pa)
-                rhsb += lib.einsum('yjk,xki->xyji', mo1b[1], e1pb)
-            rhsa -= lib.einsum('xjl,yli->xyji', f1pa, mo1a[1])
-            rhsb -= lib.einsum('xjl,yli->xyji', f1pb, mo1b[1])
-            rhsa -= lib.einsum('yjl,xli->xyji', f1ma, mo1a[0])
-            rhsb -= lib.einsum('yjl,xli->xyji', f1mb, mo1b[0])
+                tmpa  = lib.einsum('xjk,yki->xyji', mo1a[0], e1ma)
+                tmpb  = lib.einsum('xjk,yki->xyji', mo1b[0], e1mb)
+                tmpa += lib.einsum('yjk,xki->xyji', mo1a[1], e1pa)
+                tmpb += lib.einsum('yjk,xki->xyji', mo1b[1], e1pb)
+            tmpa -= lib.einsum('xjl,yli->xyji', f1pa, mo1a[1])
+            tmpb -= lib.einsum('xjl,yli->xyji', f1pb, mo1b[1])
+            tmpa -= lib.einsum('yjl,xli->xyji', f1ma, mo1a[0])
+            tmpb -= lib.einsum('yjl,xli->xyji', f1mb, mo1b[0])
+            rhsa += tmpa.reshape(9,*tmpa.shape[-2:])
+            rhsb += tmpb.reshape(9,*tmpb.shape[-2:])
                 
         elif 0 in freq:
             w = freq[0] if freq[0] != 0 else freq[1]
@@ -1469,10 +1513,8 @@ class UCPHFBase(CPHFBase):
                 s2voa, s2vob = self._to_vo(self.get_s2())
                 t2voa, t2vob = self._to_vo(self.get_t2(freq=(0,w)))
                 
-                tmpa = s2voa * e0a
-                tmpb = s2vob * e0b
-                tmpa += lib.einsum('xjl,yli,i->xyji', s1vta, mo11a, e0a)
-                tmpb += lib.einsum('xjl,yli,i->xyji', s1vtb, mo11b, e0b)
+                tmpa  = lib.einsum('xjl,yli,i->xyji', s1vta, mo11a, e0a)
+                tmpb  = lib.einsum('xjl,yli,i->xyji', s1vtb, mo11b, e0b)
                 tmpa += lib.einsum('yjl,xli,i->xyji', s1vta, mo10a, e0a)
                 tmpb += lib.einsum('yjl,xli,i->xyji', s1vtb, mo10b, e0b)
                 tmpa += lib.einsum('xjk,yki->xyji', s1voa, e11a)
@@ -1480,12 +1522,14 @@ class UCPHFBase(CPHFBase):
                 tmpa += lib.einsum('yjk,xki->xyji', s1voa, e10a)
                 tmpb += lib.einsum('yjk,xki->xyji', s1vob, e10b)
 
+                rhsa += s2voa * e0a
+                rhsb += s2vob * e0b
+                rhsa += t2voa
+                rhsb += t2vob
                 tmpa -= lib.einsum('xjl,yli->xyji', s1vta, mo11a) * w
                 tmpb -= lib.einsum('xjl,yli->xyji', s1vtb, mo11b) * w
                 tmpa += lib.einsum('yjl,xli->xyji', t1vta, mo10a)
                 tmpb += lib.einsum('yjl,xli->xyji', t1vtb, mo10b)
-                tmpa += t2voa
-                tmpb += t2vob
                 
                 tmpa += lib.einsum('xjk,yki->xyji', mo10a[:,~occidxa], e11a)
                 tmpb += lib.einsum('xjk,yki->xyji', mo10b[:,~occidxb], e11b)
@@ -1504,11 +1548,11 @@ class UCPHFBase(CPHFBase):
             tmpb -= lib.einsum('yjl,xli->xyji', f11b, mo10b)
             
             if freq.index(0) == 1:
-                rhsa += tmpa.transpose(1,0,2,3)
-                rhsb += tmpb.transpose(1,0,2,3)
+                rhsa += tmpa.transpose(1,0,2,3).reshape(9,*tmpa.shape[-2:])
+                rhsb += tmpb.transpose(1,0,2,3).reshape(9,*tmpb.shape[-2:])
             else:
-                rhsa += tmpa
-                rhsb += tmpb
+                rhsa += tmpa.reshape(9,*tmpa.shape[-2:])
+                rhsb += tmpb.reshape(9,*tmpb.shape[-2:])
 
         else:
             w0 = freq[0]
@@ -1543,10 +1587,10 @@ class UCPHFBase(CPHFBase):
                 s2voa, s2vob = self._to_vo(self.get_s2())
                 t2voa, t2vob = self._to_vo(self.get_t2(freq))
                 
-                tmpa = s2voa * e0a
-                tmpb = s2vob * e0b
-                tmpa += lib.einsum('xjl,yli,i->xyji', s1vta, mo11a, e0a)
-                tmpb += lib.einsum('xjl,yli,i->xyji', s1vtb, mo11b, e0b)
+                rhsa += s2voa * e0a
+                rhsb += s2vob * e0b
+                tmpa  = lib.einsum('xjl,yli,i->xyji', s1vta, mo11a, e0a)
+                tmpb  = lib.einsum('xjl,yli,i->xyji', s1vtb, mo11b, e0b)
                 tmpa += lib.einsum('yjl,xli,i->xyji', s1vta, mo10a, e0a)
                 tmpb += lib.einsum('yjl,xli,i->xyji', s1vtb, mo10b, e0b)
                 tmpa += lib.einsum('xjk,yki->xyji', s1voa, e11a)
@@ -1554,6 +1598,8 @@ class UCPHFBase(CPHFBase):
                 tmpa += lib.einsum('yjk,xki->xyji', s1voa, e10a)
                 tmpb += lib.einsum('yjk,xki->xyji', s1vob, e10b)
 
+                rhsa += t2voa
+                rhsb += t2vob
                 tmpa -= lib.einsum('xjl,yli->xyji', s1vta, mo11a) * w1
                 tmpb -= lib.einsum('xjl,yli->xyji', s1vtb, mo11b) * w1
                 tmpa -= lib.einsum('yjl,xli->xyji', s1vta, mo10a) * w0
@@ -1562,8 +1608,6 @@ class UCPHFBase(CPHFBase):
                 tmpb += lib.einsum('xjl,yli->xyji', t10b, mo11b)
                 tmpa += lib.einsum('yjl,xli->xyji', t11a, mo10a)
                 tmpb += lib.einsum('yjl,xli->xyji', t11b, mo10b)
-                tmpa += t2voa
-                tmpb += t2vob
 
                 tmpa += lib.einsum('xjk,yki->xyji', mo10a[:,~occidxa], e11a)
                 tmpb += lib.einsum('xjk,yki->xyji', mo10b[:,~occidxb], e11b)
@@ -1581,8 +1625,8 @@ class UCPHFBase(CPHFBase):
             tmpa -= lib.einsum('yjl,xli->xyji', f11a, mo10a)
             tmpb -= lib.einsum('yjl,xli->xyji', f11b, mo10b)
 
-            rhsa += tmpa
-            rhsb += tmpb
+            rhsa += tmpa.reshape(9,*tmpa.shape[-2:])
+            rhsb += tmpb.reshape(9,*tmpb.shape[-2:])
         
         return (rhsa, rhsb)
 
@@ -1600,7 +1644,7 @@ class UCPHFBase(CPHFBase):
             if freq == 0:
                 def lhs(mo1): # U(0)
                     mo1 = mo1.reshape(3,-1)
-                    mo1a, mo1b = numpy.split(mo1, [nvira*nocca], axis=-1)
+                    mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca])
                     mo1 = (mo1a.reshape(3,nvira,nocca),
                            mo1b.reshape(3,nvirb,noccb))
                     v1 = self.get_vind(mo1, freq, **kwargs)
@@ -1620,7 +1664,7 @@ class UCPHFBase(CPHFBase):
                 mo1 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
                                  tol=self.conv_tol, verbose=log)
                 mo1 = mo1.reshape(3,-1)
-                mo1a, mo1b = numpy.split(mo1, [nvira*nocca], axis=-1)
+                mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca])
                 mo1a = mo1a.reshape(3,nvira,nocca)
                 mo1b = mo1b.reshape(3,nvirb,noccb)
                 if self.with_s1:
@@ -1631,12 +1675,12 @@ class UCPHFBase(CPHFBase):
             else:
                 def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
                     mo1 = mo1.reshape(3,-1)
-                    mo1a, mo1b = numpy.split(mo1, [nvira*nocca*2], axis=-1)
+                    mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca*2])
                     mo1 = (mo1a.reshape(3,2,nvira,nocca).swapaxes(0,1),
                            mo1b.reshape(3,2,nvirb,noccb).swapaxes(0,1))
                     v1 = self.get_vind(mo1, freq, **kwargs)
-                    v1pa, v1pb = self._to_vo(v1) # shape: (3,nvir,nocc)
-                    v1ma, v1mb = self._to_vo(v1.swapaxes(-2,-1).conj())
+                    v1pa, v1pb = self._to_vo(v1) # v1 shape: (2,3,nao,nao)
+                    v1ma, v1mb = self._to_vo(v1.transpose(0,1,3,2).conj())
                     v1pa /= (e0voa + freq)
                     v1ma /= (e0voa - freq)
                     v1pb /= (e0vob + freq)
@@ -1656,7 +1700,7 @@ class UCPHFBase(CPHFBase):
                 mo1 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
                                  tol=self.conv_tol, verbose=log)
                 mo1 = mo1.reshape(3,-1)
-                mo1a, mo1b = numpy.split(mo1, [nvira*nocca*2], axis=-1)
+                mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca*2])
                 mo1a = mo1a.reshape(3,2,nvira,nocca).swapaxes(0,1)
                 mo1b = mo1b.reshape(3,2,nvirb,noccb).swapaxes(0,1)
                 if self.with_s1:
@@ -1675,63 +1719,62 @@ class UCPHFBase(CPHFBase):
             
             if freq == (0,0):
                 def lhs(mo2): # U(0,0)
-                    mo2 = mo2.reshape(3,3,-1)
-                    mo2a, mo2b = numpy.split(mo2, [nvira*nocca], axis=-1)
-                    mo2 = (mo2a.reshape(3,3,nvira,nocca),
-                           mo2b.reshape(3,3,nvirb,noccb))
+                    mo2 = mo2.reshape(9,-1)
+                    mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca])
+                    mo2 = (mo2a.reshape(9,nvira,nocca),
+                           mo2b.reshape(9,nvirb,noccb))
                     v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
                     v2a, v2b = self._to_vo(v2)
                     v2a /= e0voa
                     v2b /= e0vob
-                    v2 = numpy.concatenate((v2a.reshape(3,3,-1),
-                                            v2b.reshape(3,3,-1)), axis=-1)
+                    v2 = numpy.hstack((v2a.reshape(9,-1),
+                                       v2b.reshape(9,-1)))
                     return v2.ravel()
                 
                 rhsa /= e0voa
                 rhsb /= e0vob
-                rhs = numpy.concatenate((rhsa.reshape(3,3,-1),
-                                         rhsb.reshape(3,3,-1)), axis=-1)
+                rhs = numpy.hstack((rhsa.reshape(9,-1),
+                                    rhsb.reshape(9,-1)))
                 rhs = rhs.ravel()
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo2 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
                                  tol=self.conv_tol, verbose=log)
-                mo2 = mo2.reshape(3,3,-1)
-                mo2a, mo2b = numpy.split(mo2, [nvira*nocca], axis=-1)
-                mo2a = mo2a.reshape(3,3,nvira,nocca)
-                mo2b = mo2b.reshape(3,3,nvirb,noccb)
+                mo2 = mo2.reshape(9,-1)
+                mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca])
+                mo2a = mo2a.reshape(9,nvira,nocca)
+                mo2b = mo2b.reshape(9,nvirb,noccb)
             
             else:
                 def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
-                    mo2 = mo2.reshape(3,3,-1)
-                    mo2a, mo2b = numpy.split(mo2, [nvira*nocca*2], axis=-1)
-                    mo2 = (mo2a.reshape(3,3,2,nvira,nocca).transpose(2,0,1,3,4),
-                           mo2b.reshape(3,3,2,nvirb,noccb).transpose(2,0,1,3,4))
+                    mo2 = mo2.reshape(9,-1)
+                    mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca*2])
+                    mo2 = (mo2a.reshape(9,2,nvira,nocca).swapaxes(0,1),
+                           mo2b.reshape(9,2,nvirb,noccb).swapaxes(0,1))
                     v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
-                    v2pa, v2pb = self._to_vo(v2) # shape: (3,3,nvir,nocc)
-                    v2ma, v2mb = self._to_vo(v2.swapaxes(-2,-1).conj())
+                    v2pa, v2pb = self._to_vo(v2) # v2 shape: (2,9,nao,nao)
+                    v2ma, v2mb = self._to_vo(v2.transpose(0,1,3,2).conj())
                     v2pa /= (e0voa + freq[0] + freq[1])
                     v2ma /= (e0voa - freq[0] - freq[1])
                     v2pb /= (e0vob + freq[0] + freq[1])
                     v2mb /= (e0vob - freq[0] - freq[1])
-                    v2 = numpy.concatenate((v2pa       .reshape(3,3,-1),
-                                            v2ma.conj().reshape(3,3,-1),
-                                            v2pb       .reshape(3,3,-1),
-                                            v2mb.conj().reshape(3,3,-1)), axis=-1)
+                    v2 = numpy.hstack((v2pa       .reshape(9,-1),
+                                       v2ma.conj().reshape(9,-1),
+                                       v2pb       .reshape(9,-1),
+                                       v2mb.conj().reshape(9,-1)))
                     return v2.ravel()
                 
-                rhs = numpy.concatenate((
-                    (rhsa       /(e0voa+freq[0]+freq[1])).reshape(3,3,-1),
-                    (rhsa.conj()/(e0voa-freq[0]-freq[1])).reshape(3,3,-1),
-                    (rhsb       /(e0vob+freq[0]+freq[1])).reshape(3,3,-1),
-                    (rhsb.conj()/(e0vob-freq[0]-freq[1])).reshape(3,3,-1)), axis=-1)
+                rhs = numpy.hstack(((rhsa       /(e0voa+freq[0]+freq[1])).reshape(9,-1),
+                                    (rhsa.conj()/(e0voa-freq[0]-freq[1])).reshape(9,-1),
+                                    (rhsb       /(e0vob+freq[0]+freq[1])).reshape(9,-1),
+                                    (rhsb.conj()/(e0vob-freq[0]-freq[1])).reshape(9,-1)))
                 rhs = rhs.ravel()
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo2 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
                                  tol=self.conv_tol, verbose=log)
-                mo2 = mo2.reshape(3,3,-1)
-                mo2a, mo2b = numpy.split(mo2, [nvira*nocca*2], axis=-1)
-                mo2a = mo2a.reshape(3,3,2,nvira,nocca).transpose(2,0,1,3,4)
-                mo2b = mo2b.reshape(3,3,2,nvirb,noccb).transpose(2,0,1,3,4)
+                mo2 = mo2.reshape(9,-1)
+                mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca*2])
+                mo2a = mo2a.reshape(9,2,nvira,nocca).swapaxes(0,1)
+                mo2b = mo2b.reshape(9,2,nvirb,noccb).swapaxes(0,1)
             
             mo2ooa, mo2oob = self._mo2oo(freq, **kwargs)
             mo2a = numpy.concatenate((mo2ooa, mo2a), axis=-2)
@@ -1758,8 +1801,10 @@ class UCPHFBase(CPHFBase):
             rhsb = rhsb.reshape(3,-1)
 
             if freq == 0:
+                rhs = numpy.hstack((rhsa, rhsb))
+                
                 def lhs(mo1): # U(0)
-                    mo1a, mo1b = numpy.split(mo1, [nvira*nocca], axis=-1)
+                    mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca])
                     mo1 = (mo1a.reshape(3,nvira,nocca),
                            mo1b.reshape(3,nvirb,noccb))
                     v1 = self.get_vind(mo1, freq, **kwargs)
@@ -1770,21 +1815,22 @@ class UCPHFBase(CPHFBase):
                                        v1b.reshape(3,-1)))
                     return v1 - rhs
                 
-                rhs = numpy.hstack((rhsa, rhsb))
-                
                 mo1 = newton_krylov(lhs, rhs, maxiter=self.max_cycle, f_tol=self.conv_tol)
-                mo1a, mo1b = numpy.split(mo1, [nvira*nocca], axis=-1)
+                mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca])
                 mo1a = mo1a.reshape(3,nvira,nocca)
                 mo1b = mo1b.reshape(3,nvirb,noccb)
 
             else:
+                rhs = numpy.hstack((rhsa, rhsa.conj(),
+                                    rhsb, rhsb.conj()))
+                
                 def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
-                    mo1a, mo1b = numpy.split(mo1, [nvira*nocca*2], axis=-1)
+                    mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca*2])
                     mo1 = (mo1a.reshape(3,2,nvira,nocca).swapaxes(0,1),
                            mo1b.reshape(3,2,nvirb,noccb).swapaxes(0,1))
                     v1 = self.get_vind(mo1, freq, **kwargs)
-                    v1pa, v1pb = self._to_vo(v1)
-                    v1ma, v1mb = self._to_vo(v1.swapaxes(-2,-1).conj())
+                    v1pa, v1pb = self._to_vo(v1) # v1 shape: (2,3,nao,nao)
+                    v1ma, v1mb = self._to_vo(v1.transpose(0,1,3,2).conj())
                     v1pa += (e0voa + freq) * mo1[0][0]
                     v1ma += (e0voa - freq) * mo1[0][1].conj()
                     v1pb += (e0vob + freq) * mo1[1][0]
@@ -1795,11 +1841,8 @@ class UCPHFBase(CPHFBase):
                                        v1mb.conj().reshape(3,-1)))
                     return v1 - rhs
                 
-                rhs = numpy.hstack((rhsa, rhsa.conj(),
-                                    rhsb, rhsb.conj()))
-                
                 mo1 = newton_krylov(lhs, rhs, maxiter=self.max_cycle, f_tol=self.conv_tol)
-                mo1a, mo1b = numpy.split(mo1, [nvira*nocca*2], axis=-1)
+                mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca*2])
                 mo1a = mo1a.reshape(3,2,nvira,nocca).swapaxes(0,1)
                 mo1b = mo1b.reshape(3,2,nvirb,noccb).swapaxes(0,1)
             
@@ -1816,54 +1859,54 @@ class UCPHFBase(CPHFBase):
         # second-order solver
         elif len(freq) == 2:
             rhsa, rhsb = self._rhs2(freq, **kwargs)
-            rhsa = rhsa.reshape(3,3,-1)
-            rhsb = rhsb.reshape(3,3,-1)
+            rhsa = rhsa.reshape(9,-1)
+            rhsb = rhsb.reshape(9,-1)
 
             if freq == (0,0):
+                rhs = numpy.hstack((rhsa, rhsb))
+                
                 def lhs(mo2): # U(0,0)
-                    mo2a, mo2b = numpy.split(mo2, [nvira*nocca], axis=-1)
-                    mo2 = (mo2a.reshape(3,3,nvira,nocca),
-                           mo2b.reshape(3,3,nvirb,noccb))
+                    mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca])
+                    mo2 = (mo2a.reshape(9,nvira,nocca),
+                           mo2b.reshape(9,nvirb,noccb))
                     v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
                     v2a, v2b = self._to_vo(v2)
                     v2a += e0voa * mo2[0]
                     v2b += e0vob * mo2[1]
-                    v2 = numpy.concatenate((v2a.reshape(3,3,-1),
-                                            v2b.reshape(3,3,-1)), axis=-1)
+                    v2 = numpy.hstack((v2a.reshape(9,-1),
+                                       v2b.reshape(9,-1)))
                     return v2 - rhs
                 
-                rhs = numpy.concatenate((rhsa, rhsb), axis=-1)
-                
                 mo2 = newton_krylov(lhs, rhs, maxiter=self.max_cycle, f_tol=self.conv_tol)
-                mo2a, mo2b = numpy.split(mo2, [nvira*nocca], axis=-1)
-                mo2a = mo2a.reshape(3,3,nvira,nocca)
-                mo2b = mo2b.reshape(3,3,nvirb,noccb)
+                mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca])
+                mo2a = mo2a.reshape(9,nvira,nocca)
+                mo2b = mo2b.reshape(9,nvirb,noccb)
                 
             else:
+                rhs = numpy.hstack((rhsa, rhsa.conj(),
+                                    rhsb, rhsb.conj()))
+                
                 def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
-                    mo2a, mo2b = numpy.split(mo2, [nvira*nocca*2], axis=-1)
-                    mo2 = (mo2a.reshape(3,3,2,nvira,nocca).transpose(2,0,1,3,4),
-                           mo2b.reshape(3,3,2,nvirb,noccb).transpose(2,0,1,3,4))
+                    mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca*2])
+                    mo2 = (mo2a.reshape(9,2,nvira,nocca).swapaxes(0,1),
+                           mo2b.reshape(9,2,nvirb,noccb).swapaxes(0,1))
                     v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
-                    v2pa, v2pb = self._to_vo(v2)
-                    v2ma, v2mb = self._to_vo(v2.swapaxes(-2,-1).conj())
+                    v2pa, v2pb = self._to_vo(v2) # v2 shape: (2,9,nao,nao)
+                    v2ma, v2mb = self._to_vo(v2.transpose(0,1,3,2).conj())
                     v2pa += (e0voa + freq[0] + freq[1]) * mo2[0][0]
                     v2ma += (e0voa - freq[0] - freq[1]) * mo2[0][1].conj()
                     v2pb += (e0vob + freq[0] + freq[1]) * mo2[1][0]
                     v2mb += (e0vob - freq[0] - freq[1]) * mo2[1][1].conj()
-                    v2 = numpy.concatenate((v2pa       .reshape(3,3,-1),
-                                            v2ma.conj().reshape(3,3,-1),
-                                            v2pb       .reshape(3,3,-1),
-                                            v2mb.conj().reshape(3,3,-1)), axis=-1)
+                    v2 = numpy.hstack((v2pa       .reshape(9,-1),
+                                       v2ma.conj().reshape(9,-1),
+                                       v2pb       .reshape(9,-1),
+                                       v2mb.conj().reshape(9,-1)))
                     return v2 - rhs
                 
-                rhs = numpy.concatenate((rhsa, rhsa.conj(),
-                                         rhsb, rhsb.conj()), axis=-1)
-                
                 mo2 = newton_krylov(lhs, rhs, maxiter=self.max_cycle, f_tol=self.conv_tol)
-                mo2a, mo2b = numpy.split(mo2, [nvira*nocca*2], axis=-1)
-                mo2a = mo2a.reshape(3,3,2,nvira,nocca).transpose(2,0,1,3,4)
-                mo2b = mo2b.reshape(3,3,2,nvirb,noccb).transpose(2,0,1,3,4)
+                mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca*2])
+                mo2a = mo2a.reshape(9,2,nvira,nocca).swapaxes(0,1)
+                mo2b = mo2b.reshape(9,2,nvirb,noccb).swapaxes(0,1)
             
             mo2ooa, mo2oob = self._mo2oo(freq, **kwargs)
             mo2a = numpy.concatenate((mo2ooa, mo2a), axis=-2)
@@ -1894,8 +1937,8 @@ class UCPHFBase(CPHFBase):
                 mo1 = (mo1a.reshape(2,1,nvira,nocca),
                        mo1b.reshape(2,1,nvirb,noccb))
                 v1 = self.get_vind(mo1, freq, **kwargs)
-                v1pa, v1pb = self._to_vo(v1)
-                v1ma, v1mb = self._to_vo(v1.swapaxes(-2,-1).conj())
+                v1pa, v1pb = self._to_vo(v1) # v1 shape: (2,1,nao,nao)
+                v1ma, v1mb = self._to_vo(v1.transpose(0,1,3,2).conj())
                 v1pa += (e0voa + freq) * mo1[0][0]
                 v1ma += (e0voa - freq) * mo1[0][1].conj()
                 v1pb += (e0vob + freq) * mo1[1][0]
@@ -1913,11 +1956,11 @@ class UCPHFBase(CPHFBase):
             
             def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
                 mo2a, mo2b = numpy.split(mo2, [nvira*nocca*2])
-                mo2 = (mo2a.reshape(2,1,1,nvira,nocca),
-                       mo2b.reshape(2,1,1,nvirb,noccb))
+                mo2 = (mo2a.reshape(2,1,nvira,nocca),
+                       mo2b.reshape(2,1,nvirb,noccb))
                 v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
-                v2pa, v2pb = self._to_vo(v2)
-                v2ma, v2mb = self._to_vo(v2.swapaxes(-2,-1).conj())
+                v2pa, v2pb = self._to_vo(v2) # v2 shape: (2,1,nao,nao)
+                v2ma, v2mb = self._to_vo(v2.transpose(0,1,3,2).conj())
                 v2pa += (e0voa + freq[0] + freq[1]) * mo2[0][0]
                 v2ma += (e0voa - freq[0] - freq[1]) * mo2[0][1].conj()
                 v2pb += (e0vob + freq[0] + freq[1]) * mo2[1][0]
@@ -1941,7 +1984,7 @@ class UCPHFBase(CPHFBase):
         
         if isinstance(freq, (int, float)):
             mo1 = numpy.linalg.solve(operator, rhs.T).T
-            mo1a, mo1b = numpy.split(mo1, [nvira*nocca*2], axis=-1)
+            mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca*2])
             mo1a = mo1a.reshape(3,2,nvira,nocca).swapaxes(0,1)
             mo1b = mo1b.reshape(3,2,nvirb,noccb).swapaxes(0,1)
             if self.with_s1:
@@ -1957,9 +2000,9 @@ class UCPHFBase(CPHFBase):
         
         else:
             mo2 = numpy.linalg.solve(operator, rhs.T).T
-            mo2a, mo2b = numpy.split(mo2, [nvira*nocca*2], axis=-1)
-            mo2a = mo2a.reshape(3,3,2,nvira,nocca).transpose(2,0,1,3,4)
-            mo2b = mo2b.reshape(3,3,2,nvirb,noccb).transpose(2,0,1,3,4)
+            mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca*2])
+            mo2a = mo2a.reshape(9,2,nvira,nocca).swapaxes(0,1)
+            mo2b = mo2b.reshape(9,2,nvirb,noccb).swapaxes(0,1)
             if freq == (0,0):
                 mo2a = mo2a[0]
                 mo2b = mo2b[0]
