@@ -798,6 +798,24 @@ class CPHFBase(lib.StreamObject):
                 v1m += (e0vo - freq) * mo1[1].conj()
                 v1 = numpy.array((v1p, v1m.conj())) # shape: (2,1,nvir,nocc)
                 return v1.ravel()
+            
+            rhs = numpy.stack((rhs, rhs.conj()), axis=1)
+            size = rhs[0].size
+            operator = numpy.empty((size, size))
+            iden = numpy.eye(size)
+            for i, row in enumerate(iden):
+                operator[:,i] = lhs(row)
+            
+            mo1 = numpy.linalg.solve(operator, rhs.reshape(3,-1).T).T
+            mo1 = mo1.reshape(3,2,nvir,nocc).swapaxes(0,1)
+            if self.with_s1:
+                mo1oo = self._to_oo(self.get_s1()) * -.5
+                mo1oo = numpy.array((mo1oo, mo1oo.transpose(0,2,1)))
+                # transpose() is more efficient than conj() for a hermitian matrix
+                mo1 = numpy.concatenate((mo1oo, mo1), axis=-2)
+            
+            log.timer('Direct solver for the first-order CP-HF/KS', *t0)
+            return mo1[0] if freq == 0 else mo1
         # second-order solver
         elif len(freq) == 2:
             rhs = self._rhs2(freq, **kwargs)
@@ -812,29 +830,13 @@ class CPHFBase(lib.StreamObject):
                 v2 = numpy.array((v2p, v2m.conj()))
                 return v2.ravel()
             
-        else:
-            raise NotImplementedError(freq)
-        
-        rhs = numpy.stack((rhs, rhs.conj()), axis=1)
-        size = rhs[0].size
-        operator = numpy.empty((size, size))
-        iden = numpy.eye(size)
-        for i, row in enumerate(iden):
-            operator[:,i] = lhs(row)
-        
-        if isinstance(freq, (int, float)):
-            mo1 = numpy.linalg.solve(operator, rhs.reshape(3,-1).T).T
-            mo1 = mo1.reshape(3,2,nvir,nocc).swapaxes(0,1)
-            if self.with_s1:
-                mo1oo = self._to_oo(self.get_s1()) * -.5
-                mo1oo = numpy.array((mo1oo, mo1oo.transpose(0,2,1)))
-                # transpose() is more efficient than conj() for a hermitian matrix
-                mo1 = numpy.concatenate((mo1oo, mo1), axis=-2)
+            rhs = numpy.stack((rhs, rhs.conj()), axis=1)
+            size = rhs[0].size
+            operator = numpy.empty((size, size))
+            iden = numpy.eye(size)
+            for i, row in enumerate(iden):
+                operator[:,i] = lhs(row)
             
-            log.timer('Direct solver for the first-order CP-HF/KS', *t0)
-            return mo1[0] if freq == 0 else mo1
-        
-        else:
             mo2 = numpy.linalg.solve(operator, rhs.reshape(9,-1).T).T
             mo2 = mo2.reshape(9,2,nvir,nocc).swapaxes(0,1)
             if freq == (0,0): mo2 = mo2[0]
@@ -842,6 +844,9 @@ class CPHFBase(lib.StreamObject):
 
             log.timer('Direct solver for the second-order CP-HF/KS', *t0)
             return mo2
+        
+        else:
+            raise NotImplementedError(freq)
 
     def _to_vo(self, ao):
         '''Convert some quantity in AO basis to that in vir.-occ. MO basis.'''
@@ -1948,6 +1953,29 @@ class UCPHFBase(CPHFBase):
                                         v1pb       .ravel(),
                                         v1mb.conj().ravel()))
                 return v1
+            
+            rhs = numpy.hstack((rhsa, rhsa.conj(),
+                                rhsb, rhsb.conj()))
+            size = rhs[0].size
+            operator = numpy.empty((size, size))
+            iden = numpy.eye(size)
+            for i, row in enumerate(iden):
+                operator[:,i] = lhs(row)
+            
+            mo1 = numpy.linalg.solve(operator, rhs.T).T
+            mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca*2])
+            mo1a = mo1a.reshape(3,2,nvira,nocca).swapaxes(0,1)
+            mo1b = mo1b.reshape(3,2,nvirb,noccb).swapaxes(0,1)
+            if self.with_s1:
+                mo1ooa, mo1oob = self._to_oo(self.get_s1()) * -.5
+                mo1ooa = numpy.array((mo1ooa, mo1ooa.transpose(0,2,1)))
+                mo1oob = numpy.array((mo1oob, mo1oob.transpose(0,2,1)))
+                # transpose() is more efficient than conj() for a hermitian matrix
+                mo1a = numpy.concatenate((mo1ooa, mo1a), axis=-2)
+                mo1b = numpy.concatenate((mo1oob, mo1b), axis=-2)
+            
+            log.timer('Direct solver for the first-order UCP-HF/KS', *t0)
+            return (mo1a[0], mo1b[0]) if freq == 0 else (mo1a, mo1b)
         # second-order solver
         elif len(freq) == 2:
             rhsa, rhsb = self._rhs2(freq, **kwargs)
@@ -1971,34 +1999,14 @@ class UCPHFBase(CPHFBase):
                                         v2mb.conj().ravel()))
                 return v2
             
-        else:
-            raise NotImplementedError(freq)
-        
-        rhs = numpy.hstack((rhsa, rhsa.conj(),
-                            rhsb, rhsb.conj()))
-        size = rhs[0].size
-        operator = numpy.empty((size, size))
-        iden = numpy.eye(size)
-        for i, row in enumerate(iden):
-            operator[:,i] = lhs(row)
-        
-        if isinstance(freq, (int, float)):
-            mo1 = numpy.linalg.solve(operator, rhs.T).T
-            mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca*2])
-            mo1a = mo1a.reshape(3,2,nvira,nocca).swapaxes(0,1)
-            mo1b = mo1b.reshape(3,2,nvirb,noccb).swapaxes(0,1)
-            if self.with_s1:
-                mo1ooa, mo1oob = self._to_oo(self.get_s1()) * -.5
-                mo1ooa = numpy.array((mo1ooa, mo1ooa.transpose(0,2,1)))
-                mo1oob = numpy.array((mo1oob, mo1oob.transpose(0,2,1)))
-                # transpose() is more efficient than conj() for a hermitian matrix
-                mo1a = numpy.concatenate((mo1ooa, mo1a), axis=-2)
-                mo1b = numpy.concatenate((mo1oob, mo1b), axis=-2)
+            rhs = numpy.hstack((rhsa, rhsa.conj(),
+                                rhsb, rhsb.conj()))
+            size = rhs[0].size
+            operator = numpy.empty((size, size))
+            iden = numpy.eye(size)
+            for i, row in enumerate(iden):
+                operator[:,i] = lhs(row)
             
-            log.timer('Direct solver for the first-order UCP-HF/KS', *t0)
-            return (mo1a[0], mo1b[0]) if freq == 0 else (mo1a, mo1b)
-        
-        else:
             mo2 = numpy.linalg.solve(operator, rhs.T).T
             mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca*2])
             mo2a = mo2a.reshape(9,2,nvira,nocca).swapaxes(0,1)
@@ -2012,6 +2020,9 @@ class UCPHFBase(CPHFBase):
 
             log.timer('Direct solver for the second-order UCP-HF/KS', *t0)
             return (mo2a, mo2b)
+        
+        else:
+            raise NotImplementedError(freq)            
 
     def _to_vo(self, ao):
         '''Convert some quantity in AO basis to that in vir.-occ. MO basis.'''
