@@ -676,10 +676,15 @@ class CPHFBase(lib.StreamObject):
                     v1 = numpy.array((v1p, v1m.conj()))
                     return v1.ravel()
                 
-                rhs = (self._rhs1( freq, **kwargs),
-                       self._rhs1(-freq, **kwargs))
-                rhs = numpy.array((rhs[0]       /(e0vo+freq),
-                                   rhs[1].conj()/(e0vo-freq)))
+                if not self.with_s1:
+                    rhs = self._rhs1(freq, **kwargs)
+                    rhs = numpy.array((rhs       /(e0vo+freq),
+                                       rhs.conj()/(e0vo-freq)))
+                else:
+                    rhs = (self._rhs1( freq, **kwargs),
+                           self._rhs1(-freq, **kwargs))
+                    rhs = numpy.array((rhs[0]       /(e0vo+freq),
+                                       rhs[1].conj()/(e0vo-freq)))
                 rhs = rhs.ravel()
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo1 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
@@ -756,8 +761,12 @@ class CPHFBase(lib.StreamObject):
                     return v1 - rhs
 
             else:
-                rhs = numpy.array((self._rhs1( freq, **kwargs),
-                                   self._rhs1(-freq, **kwargs).conj()))
+                if not self.with_s1:
+                    rhs = self._rhs1(freq, **kwargs)
+                    rhs = numpy.array((rhs, rhs.conj()))
+                else:
+                    rhs = numpy.array((self._rhs1( freq, **kwargs),
+                                       self._rhs1(-freq, **kwargs).conj()))
 
                 def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
                     v1 = self.get_vind(mo1, freq, **kwargs)
@@ -830,9 +839,13 @@ class CPHFBase(lib.StreamObject):
                 v1 = numpy.array((v1p, v1m.conj())) # shape: (2,1,nvir,nocc)
                 return v1.ravel()
             
-            rhs = (self._rhs1( freq, **kwargs),
-                   self._rhs1(-freq, **kwargs))
-            rhs = numpy.stack((rhs[0], rhs[1].conj()), axis=1)
+            if not self.with_s1:
+                rhs = self._rhs1(freq, **kwargs)
+                rhs = numpy.stack((rhs, rhs.conj()), axis=1)
+            else:
+                rhs = (self._rhs1( freq, **kwargs),
+                       self._rhs1(-freq, **kwargs))
+                rhs = numpy.stack((rhs[0], rhs[1].conj()), axis=1)
             size = rhs[0].size
             operator = numpy.empty((size, size))
             iden = numpy.eye(size)
@@ -1728,12 +1741,19 @@ class UCPHFBase(CPHFBase):
                                        v1mb.conj().reshape(3,-1)))
                     return v1.ravel()
                 
-                rhs = (self._rhs1( freq, **kwargs),
-                       self._rhs1(-freq, **kwargs))
-                rhs = numpy.hstack(((rhs[0][0]       /(e0voa+freq)).reshape(3,-1),
-                                    (rhs[1][0].conj()/(e0voa-freq)).reshape(3,-1),
-                                    (rhs[0][1]       /(e0vob+freq)).reshape(3,-1),
-                                    (rhs[1][1].conj()/(e0vob-freq)).reshape(3,-1)))
+                if not self.with_s1:
+                    rhs = self._rhs1(freq, **kwargs)
+                    rhs = numpy.hstack(((rhs[0]/(e0voa+freq)).reshape(3,-1),
+                                        (rhs[0]/(e0voa-freq)).reshape(3,-1).conj(),
+                                        (rhs[1]/(e0vob+freq)).reshape(3,-1),
+                                        (rhs[1]/(e0vob-freq)).reshape(3,-1).conj()))
+                else:
+                    rhs = (self._rhs1( freq, **kwargs),
+                           self._rhs1(-freq, **kwargs))
+                    rhs = numpy.hstack(((rhs[0][0]/(e0voa+freq)).reshape(3,-1),
+                                        (rhs[1][0]/(e0voa-freq)).reshape(3,-1).conj(),
+                                        (rhs[0][1]/(e0vob+freq)).reshape(3,-1),
+                                        (rhs[1][1]/(e0vob-freq)).reshape(3,-1).conj()))
                 rhs = rhs.ravel()
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo1 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
@@ -1858,12 +1878,19 @@ class UCPHFBase(CPHFBase):
                 mo1b = mo1b.reshape(3,nvirb,noccb)
 
             else:
-                rhs = (self._rhs1( freq, **kwargs),
-                       self._rhs1(-freq, **kwargs))
-                rhs = numpy.hstack((rhs[0][0].reshape(3,-1),
-                                    rhs[1][0].reshape(3,-1).conj(),
-                                    rhs[0][1].reshape(3,-1),
-                                    rhs[1][1].reshape(3,-1).conj()))
+                if not self.with_s1:
+                    rhs = self._rhs1(freq, **kwargs)
+                    rhs = numpy.hstack((rhs[0].reshape(3,-1),
+                                        rhs[0].reshape(3,-1).conj(),
+                                        rhs[1].reshape(3,-1),
+                                        rhs[1].reshape(3,-1).conj()))
+                else:
+                    rhs = (self._rhs1( freq, **kwargs),
+                           self._rhs1(-freq, **kwargs))
+                    rhs = numpy.hstack((rhs[0][0].reshape(3,-1),
+                                        rhs[1][0].reshape(3,-1).conj(),
+                                        rhs[0][1].reshape(3,-1),
+                                        rhs[1][1].reshape(3,-1).conj())) 
                 
                 def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
                     mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca*2])
@@ -1987,12 +2014,19 @@ class UCPHFBase(CPHFBase):
                                         v1mb.conj().ravel()))
                 return v1
             
-            rhs = (self._rhs1( freq, **kwargs),
-                   self._rhs1(-freq, **kwargs))
-            rhs = numpy.hstack((rhs[0][0].reshape(3,-1),
-                                rhs[1][0].reshape(3,-1).conj(),
-                                rhs[0][1].reshape(3,-1),
-                                rhs[1][1].reshape(3,-1).conj()))
+            if not self.with_s1:
+                rhs = self._rhs1(freq, **kwargs)
+                rhs = numpy.hstack((rhs[0].reshape(3,-1),
+                                    rhs[0].reshape(3,-1).conj(),
+                                    rhs[1].reshape(3,-1),
+                                    rhs[1].reshape(3,-1).conj()))
+            else:
+                rhs = (self._rhs1( freq, **kwargs),
+                       self._rhs1(-freq, **kwargs))
+                rhs = numpy.hstack((rhs[0][0].reshape(3,-1),
+                                    rhs[1][0].reshape(3,-1).conj(),
+                                    rhs[0][1].reshape(3,-1),
+                                    rhs[1][1].reshape(3,-1).conj()))
             size = rhs[0].size
             operator = numpy.empty((size, size))
             iden = numpy.eye(size)
