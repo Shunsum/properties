@@ -3,7 +3,7 @@ from scipy.optimize import newton_krylov
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf.scf import hf, _response_functions
-from pyscf.x2c.x2c import X2C1E_GSCF
+from . import numint, numint2c, r_numint
 
 class CPHFBase(lib.StreamObject):
     def __init__(self, mf):
@@ -175,20 +175,18 @@ class CPHFBase(lib.StreamObject):
             hermi = freq == 0
         elif len(freq) == 2:
             dm_deriv = self.get_dm2(mo_deriv, freq, **kwargs)
-            hermi = freq[0] == 0 and freq[1] == 0
+            hermi = freq[0] == freq[1] == 0
         else:
             raise NotImplementedError(freq)
         
-        mf = self.mf
-        vind = mf.gen_response(hermi=hermi)
-        # GKS collinear response function does not support complex density matrices
-        if not hermi and isinstance(mf, X2C1E_GSCF) and \
-            hasattr(mf, 'collinear') and mf.collinear == 'col':
+        vind = self.mf.gen_response(hermi=hermi)
+
+        try:
+            return vind(dm_deriv)
+        except NotImplementedError: # nr_fxc does not support complex density matrices
             dmr_deriv = dm_deriv.real
             dmi_deriv = dm_deriv.imag
             return vind(dmr_deriv) + vind(dmi_deriv)*1j
-        
-        return vind(dm_deriv)
 
     def get_f1(self, mo1=None, freq=0, **kwargs):
         '''The first-order Fock matrix in AO basis.'''
@@ -219,6 +217,12 @@ class CPHFBase(lib.StreamObject):
         else:
             return self._to_oo(e1)
         
+    def get_h1(self, **kwargs):
+        '''The first-order core-Hamiltonian in AO basis.'''
+        mf = self.mf
+        nao = mf.mo_coeff.shape[-2]
+        return numpy.zeros((3,nao,nao))
+
     def get_jk1(self, dm0=None):
         '''The first-order JK wrt the external magnetic field.'''
         mf = self.mf
@@ -242,14 +246,40 @@ class CPHFBase(lib.StreamObject):
         if mo2 is None and with_mo2:
             try: mo2 = self.mo2[freq]
             except KeyError: mo2 = self.solve_mo2(freq=freq, **kwargs)
+        
         f2 = self.get_vind(mo2, freq, with_mo2=with_mo2, **kwargs)
+
         if isinstance(self.mf, hf.KohnShamDFT):
-            pass
+            mf = self.mf
+            ni = mf._numint
+            ni.libxc.test_deriv_order(mf.xc, 3, raise_error=True)
+            dm0 = mf.make_rdm1()
+            cur_mem = lib.current_memory()[0]
+            max_memory = max(2000, mf.max_memory*.8 - cur_mem)
+
+            try: mo10 = self.mo1[freq[0]]
+            except KeyError: mo10 = self.solve_mo1(freq=freq[0], **kwargs)
+            dm10 = self.get_dm1(mo10, freq[0])
+
+            if freq[1] == freq[0]:
+                dm11 = dm10
+            elif freq[1] == -freq[0]:
+                dm11 = dm10.transpose(0,2,1).conj()
+            else:
+                try: mo11 = self.mo1[freq[1]]
+                except KeyError: mo11 = self.solve_mo1(freq=freq[1], **kwargs)
+                dm11 = self.get_dm1(mo11, freq[1])
+            
+            f2 += ni.get_kxc(mf.mol, mf.grids, mf.xc, dm0, (dm10,dm11),
+                             (freq[0]==0,freq[1]==0), max_memory)
+
         if hasattr(self, 'get_h2'):
             f2 += self.get_h2(**kwargs)
+        
         if self.with_s1:
             f2 += self.get_jk2()
             f2 += self.get_jk11(freq)
+        
         return f2
 
     def get_jk2(self):
@@ -618,8 +648,6 @@ class CPHFBase(lib.StreamObject):
         nvir, nocc = e0vo.shape
         # first-order solver
         if isinstance(freq, (int, float)):
-            rhs = self._rhs1(freq, **kwargs)
-            
             if freq == 0:
                 def lhs(mo1): # U(0)
                     mo1 = mo1.reshape(3,nvir,nocc)
@@ -627,7 +655,7 @@ class CPHFBase(lib.StreamObject):
                     v1 = self._to_vo(v1) / e0vo
                     return v1.ravel()
                 
-                rhs /= e0vo
+                rhs = self._rhs1(freq, **kwargs) / e0vo
                 rhs = rhs.ravel()
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo1 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
@@ -648,8 +676,10 @@ class CPHFBase(lib.StreamObject):
                     v1 = numpy.array((v1p, v1m.conj()))
                     return v1.ravel()
                 
-                rhs = numpy.array((rhs       /(e0vo+freq),
-                                   rhs.conj()/(e0vo-freq)))
+                rhs = (self._rhs1( freq, **kwargs),
+                       self._rhs1(-freq, **kwargs))
+                rhs = numpy.array((rhs[0]       /(e0vo+freq),
+                                   rhs[1].conj()/(e0vo-freq)))
                 rhs = rhs.ravel()
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo1 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
@@ -665,8 +695,6 @@ class CPHFBase(lib.StreamObject):
             return mo1
         # second-order solver
         elif len(freq) == 2:
-            rhs = self._rhs2(freq, **kwargs)
-            
             if freq == (0,0):
                 def lhs(mo2): # U(0,0)
                     mo2 = mo2.reshape(9,nvir,nocc)
@@ -674,7 +702,7 @@ class CPHFBase(lib.StreamObject):
                     v2 = self._to_vo(v2) / e0vo
                     return v2.ravel()
                 
-                rhs /= e0vo
+                rhs = self._rhs2(freq, **kwargs) / e0vo
                 rhs = rhs.ravel()
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo2 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
@@ -692,8 +720,10 @@ class CPHFBase(lib.StreamObject):
                     v2 = numpy.array((v2p, v2m.conj()))
                     return v2.ravel()
                 
-                rhs = numpy.array((rhs       /(e0vo+freq[0]+freq[1]),
-                                   rhs.conj()/(e0vo-freq[0]-freq[1])))
+                rhs = (self._rhs2(freq, **kwargs),
+                       self._rhs2((-freq[0],-freq[1]), **kwargs))
+                rhs = numpy.array((rhs[0]       /(e0vo+freq[0]+freq[1]),
+                                   rhs[1].conj()/(e0vo-freq[0]-freq[1])))
                 rhs = rhs.ravel()
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo2 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
@@ -716,9 +746,9 @@ class CPHFBase(lib.StreamObject):
         e0vo = self.get_e0vo()
         # first-order solver
         if isinstance(freq, (int, float)):
-            rhs = self._rhs1(freq, **kwargs)
-
             if freq == 0:
+                rhs = self._rhs1(freq, **kwargs)
+
                 def lhs(mo1): # U(0)
                     v1 = self.get_vind(mo1, freq, **kwargs)
                     v1 = self._to_vo(v1)
@@ -726,7 +756,8 @@ class CPHFBase(lib.StreamObject):
                     return v1 - rhs
 
             else:
-                rhs = numpy.array((rhs, rhs.conj()))
+                rhs = numpy.array((self._rhs1( freq, **kwargs),
+                                   self._rhs1(-freq, **kwargs).conj()))
 
                 def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
                     v1 = self.get_vind(mo1, freq, **kwargs)
@@ -748,9 +779,9 @@ class CPHFBase(lib.StreamObject):
             return mo1
         # second-order solver
         elif len(freq) == 2:
-            rhs = self._rhs2(freq, **kwargs)
-
             if freq == (0,0):
+                rhs = self._rhs2(freq, **kwargs)
+
                 def lhs(mo2): # U(0,0)
                     v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
                     v2 = self._to_vo(v2)
@@ -758,7 +789,9 @@ class CPHFBase(lib.StreamObject):
                     return v2 - rhs
                 
             else:
-                rhs = numpy.array((rhs, rhs.conj()))
+                rhs = (self._rhs2(freq, **kwargs),
+                       self._rhs2((-freq[0],-freq[1]), **kwargs))
+                rhs = numpy.array((rhs[0], rhs[1].conj()))
 
                 def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
                     v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
@@ -787,8 +820,6 @@ class CPHFBase(lib.StreamObject):
         nvir, nocc = e0vo.shape
         # first-order solver
         if isinstance(freq, (int, float)):
-            rhs = self._rhs1(freq, **kwargs)
-            
             def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
                 mo1 = mo1.reshape(2,1,nvir,nocc)
                 v1 = self.get_vind(mo1, freq, **kwargs)
@@ -799,7 +830,9 @@ class CPHFBase(lib.StreamObject):
                 v1 = numpy.array((v1p, v1m.conj())) # shape: (2,1,nvir,nocc)
                 return v1.ravel()
             
-            rhs = numpy.stack((rhs, rhs.conj()), axis=1)
+            rhs = (self._rhs1( freq, **kwargs),
+                   self._rhs1(-freq, **kwargs))
+            rhs = numpy.stack((rhs[0], rhs[1].conj()), axis=1)
             size = rhs[0].size
             operator = numpy.empty((size, size))
             iden = numpy.eye(size)
@@ -818,8 +851,6 @@ class CPHFBase(lib.StreamObject):
             return mo1[0] if freq == 0 else mo1
         # second-order solver
         elif len(freq) == 2:
-            rhs = self._rhs2(freq, **kwargs)
-            
             def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
                 mo2 = mo2.reshape(2,1,nvir,nocc)
                 v2 = self.get_vind(mo2, freq, with_mo1=False, **kwargs)
@@ -830,7 +861,9 @@ class CPHFBase(lib.StreamObject):
                 v2 = numpy.array((v2p, v2m.conj()))
                 return v2.ravel()
             
-            rhs = numpy.stack((rhs, rhs.conj()), axis=1)
+            rhs = (self._rhs2(freq, **kwargs),
+                   self._rhs2((-freq[0],-freq[1]), **kwargs))
+            rhs = numpy.stack((rhs[0], rhs[1].conj()), axis=1)
             size = rhs[0].size
             operator = numpy.empty((size, size))
             iden = numpy.eye(size)
@@ -1644,8 +1677,6 @@ class UCPHFBase(CPHFBase):
         nvirb, noccb = e0vob.shape
         # first-order solver
         if isinstance(freq, (int, float)): # mo1[0] = Ua, mo1[1] = Ub
-            rhsa, rhsb = self._rhs1(freq, **kwargs)
-            
             if freq == 0:
                 def lhs(mo1): # U(0)
                     mo1 = mo1.reshape(3,-1)
@@ -1660,6 +1691,7 @@ class UCPHFBase(CPHFBase):
                                        v1b.reshape(3,-1)))
                     return v1.ravel()
                 
+                rhsa, rhsb = self._rhs1(freq, **kwargs)
                 rhsa /= e0voa
                 rhsb /= e0vob
                 rhs = numpy.hstack((rhsa.reshape(3,-1),
@@ -1696,10 +1728,12 @@ class UCPHFBase(CPHFBase):
                                        v1mb.conj().reshape(3,-1)))
                     return v1.ravel()
                 
-                rhs = numpy.hstack(((rhsa       /(e0voa+freq)).reshape(3,-1),
-                                    (rhsa.conj()/(e0voa-freq)).reshape(3,-1),
-                                    (rhsb       /(e0vob+freq)).reshape(3,-1),
-                                    (rhsb.conj()/(e0vob-freq)).reshape(3,-1)))
+                rhs = (self._rhs1( freq, **kwargs),
+                       self._rhs1(-freq, **kwargs))
+                rhs = numpy.hstack(((rhs[0][0]       /(e0voa+freq)).reshape(3,-1),
+                                    (rhs[1][0].conj()/(e0voa-freq)).reshape(3,-1),
+                                    (rhs[0][1]       /(e0vob+freq)).reshape(3,-1),
+                                    (rhs[1][1].conj()/(e0vob-freq)).reshape(3,-1)))
                 rhs = rhs.ravel()
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo1 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
@@ -1720,8 +1754,6 @@ class UCPHFBase(CPHFBase):
             return (mo1a, mo1b)
         # second-order solver
         elif len(freq) == 2: # mo2[0] = Ua, mo2[1] = Ub
-            rhsa, rhsb = self._rhs2(freq, **kwargs)
-            
             if freq == (0,0):
                 def lhs(mo2): # U(0,0)
                     mo2 = mo2.reshape(9,-1)
@@ -1736,6 +1768,7 @@ class UCPHFBase(CPHFBase):
                                        v2b.reshape(9,-1)))
                     return v2.ravel()
                 
+                rhsa, rhsb = self._rhs2(freq, **kwargs)
                 rhsa /= e0voa
                 rhsb /= e0vob
                 rhs = numpy.hstack((rhsa.reshape(9,-1),
@@ -1768,10 +1801,12 @@ class UCPHFBase(CPHFBase):
                                        v2mb.conj().reshape(9,-1)))
                     return v2.ravel()
                 
-                rhs = numpy.hstack(((rhsa       /(e0voa+freq[0]+freq[1])).reshape(9,-1),
-                                    (rhsa.conj()/(e0voa-freq[0]-freq[1])).reshape(9,-1),
-                                    (rhsb       /(e0vob+freq[0]+freq[1])).reshape(9,-1),
-                                    (rhsb.conj()/(e0vob-freq[0]-freq[1])).reshape(9,-1)))
+                rhs = (self._rhs2(freq, **kwargs),
+                       self._rhs2((-freq[0],-freq[1]), **kwargs))
+                rhs = numpy.hstack(((rhs[0][0]       /(e0voa+freq[0]+freq[1])).reshape(9,-1),
+                                    (rhs[1][0].conj()/(e0voa-freq[0]-freq[1])).reshape(9,-1),
+                                    (rhs[0][1]       /(e0vob+freq[0]+freq[1])).reshape(9,-1),
+                                    (rhs[1][1].conj()/(e0vob-freq[0]-freq[1])).reshape(9,-1)))
                 rhs = rhs.ravel()
                 # casting multiple vectors into Krylov solver yields poor and inefficient results
                 mo2 = lib.krylov(lhs, rhs, max_cycle=self.max_cycle,
@@ -1801,12 +1836,9 @@ class UCPHFBase(CPHFBase):
         nvirb, noccb = e0vob.shape
         # first-order solver
         if isinstance(freq, (int, float)):
-            rhsa, rhsb = self._rhs1(freq, **kwargs)
-            rhsa = rhsa.reshape(3,-1)
-            rhsb = rhsb.reshape(3,-1)
-
             if freq == 0:
-                rhs = numpy.hstack((rhsa, rhsb))
+                rhsa, rhsb = self._rhs1(freq, **kwargs)
+                rhs = numpy.hstack((rhsa.reshape(3,-1), rhsb.reshape(3,-1)))
                 
                 def lhs(mo1): # U(0)
                     mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca])
@@ -1826,8 +1858,12 @@ class UCPHFBase(CPHFBase):
                 mo1b = mo1b.reshape(3,nvirb,noccb)
 
             else:
-                rhs = numpy.hstack((rhsa, rhsa.conj(),
-                                    rhsb, rhsb.conj()))
+                rhs = (self._rhs1( freq, **kwargs),
+                       self._rhs1(-freq, **kwargs))
+                rhs = numpy.hstack((rhs[0][0].reshape(3,-1),
+                                    rhs[1][0].reshape(3,-1).conj(),
+                                    rhs[0][1].reshape(3,-1),
+                                    rhs[1][1].reshape(3,-1).conj()))
                 
                 def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
                     mo1a, mo1b = numpy.hsplit(mo1, [nvira*nocca*2])
@@ -1863,12 +1899,9 @@ class UCPHFBase(CPHFBase):
             return (mo1a, mo1b)
         # second-order solver
         elif len(freq) == 2:
-            rhsa, rhsb = self._rhs2(freq, **kwargs)
-            rhsa = rhsa.reshape(9,-1)
-            rhsb = rhsb.reshape(9,-1)
-
             if freq == (0,0):
-                rhs = numpy.hstack((rhsa, rhsb))
+                rhsa, rhsb = self._rhs2(freq, **kwargs)
+                rhs = numpy.hstack((rhsa.reshape(9,-1), rhsb.reshape(9,-1)))
                 
                 def lhs(mo2): # U(0,0)
                     mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca])
@@ -1888,8 +1921,12 @@ class UCPHFBase(CPHFBase):
                 mo2b = mo2b.reshape(9,nvirb,noccb)
                 
             else:
-                rhs = numpy.hstack((rhsa, rhsa.conj(),
-                                    rhsb, rhsb.conj()))
+                rhs = (self._rhs2(freq, **kwargs),
+                       self._rhs2((-freq[0],-freq[1]), **kwargs))
+                rhs = numpy.hstack((rhs[0][0].reshape(9,-1),
+                                    rhs[1][0].reshape(9,-1).conj(),
+                                    rhs[0][1].reshape(9,-1),
+                                    rhs[1][1].reshape(9,-1).conj()))
                 
                 def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
                     mo2a, mo2b = numpy.hsplit(mo2, [nvira*nocca*2])
@@ -1933,10 +1970,6 @@ class UCPHFBase(CPHFBase):
         nvirb, noccb = e0vob.shape
         # first-order solver
         if isinstance(freq, (int, float)):
-            rhsa, rhsb = self._rhs1(freq, **kwargs)
-            rhsa = rhsa.reshape(3,-1)
-            rhsb = rhsb.reshape(3,-1)
-            
             def lhs(mo1): # mo1[0] = U(w), mo1[1] = U*(-w)
                 mo1a, mo1b = numpy.split(mo1, [nvira*nocca*2])
                 mo1 = (mo1a.reshape(2,1,nvira,nocca),
@@ -1954,8 +1987,12 @@ class UCPHFBase(CPHFBase):
                                         v1mb.conj().ravel()))
                 return v1
             
-            rhs = numpy.hstack((rhsa, rhsa.conj(),
-                                rhsb, rhsb.conj()))
+            rhs = (self._rhs1( freq, **kwargs),
+                   self._rhs1(-freq, **kwargs))
+            rhs = numpy.hstack((rhs[0][0].reshape(3,-1),
+                                rhs[1][0].reshape(3,-1).conj(),
+                                rhs[0][1].reshape(3,-1),
+                                rhs[1][1].reshape(3,-1).conj()))
             size = rhs[0].size
             operator = numpy.empty((size, size))
             iden = numpy.eye(size)
@@ -1978,10 +2015,6 @@ class UCPHFBase(CPHFBase):
             return (mo1a[0], mo1b[0]) if freq == 0 else (mo1a, mo1b)
         # second-order solver
         elif len(freq) == 2:
-            rhsa, rhsb = self._rhs2(freq, **kwargs)
-            rhsa = rhsa.reshape(9,-1)
-            rhsb = rhsb.reshape(9,-1)
-            
             def lhs(mo2): # mo2[0] = U(w1,w2), mo2[1] = U*(-w1,-w2)
                 mo2a, mo2b = numpy.split(mo2, [nvira*nocca*2])
                 mo2 = (mo2a.reshape(2,1,nvira,nocca),
@@ -1999,8 +2032,12 @@ class UCPHFBase(CPHFBase):
                                         v2mb.conj().ravel()))
                 return v2
             
-            rhs = numpy.hstack((rhsa, rhsa.conj(),
-                                rhsb, rhsb.conj()))
+            rhs = (self._rhs2(freq, **kwargs),
+                   self._rhs2((-freq[0],-freq[1]), **kwargs))
+            rhs = numpy.hstack((rhs[0][0].reshape(9,-1),
+                                rhs[1][0].reshape(9,-1).conj(),
+                                rhs[0][1].reshape(9,-1),
+                                rhs[1][1].reshape(9,-1).conj()))
             size = rhs[0].size
             operator = numpy.empty((size, size))
             iden = numpy.eye(size)
