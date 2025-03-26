@@ -165,7 +165,7 @@ class DHFPolar(GHFPolar):
                 
                 dm2 += dm21.reshape(9,*dm21.shape[-2:])
         
-        return dm2*2 if isinstance(mf, hf.RHF) else dm2
+        return dm2
 
     def get_h1(self, **kwargs):
         mf = self.mf
@@ -178,7 +178,7 @@ class DHFPolar(GHFPolar):
             ll_dip = mol.intor_symmetric('int1e_r_spinor', comp=3)
             ss_dip = mol.intor_symmetric('int1e_sprsp_spinor', comp=3) * (.5/c)**2
             dip = _block_diag(ll_dip, ss_dip)
-        return -dip
+        return dip
 
     def get_e0vo(self):
         '''e0vo = e0v - e0o.'''
@@ -315,7 +315,7 @@ if __name__ == '__main__':
     def apply_E(E):
         mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
-        return -mf.dip_moment(mol, mf.make_rdm1(), unit_symbol='AU', verbose=0)
+        return mf.dip_moment(mol, mf.make_rdm1(), unit_symbol='AU', verbose=0)
     print(polar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])

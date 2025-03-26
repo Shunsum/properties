@@ -25,20 +25,22 @@ def rho_eff(rho, collinear):
     return rho
 
 def hyperpolarizability(pl:'GHFPolar', freq=(0,0,0), **kwargs):
-    '''(First) Hyperpolarizability (with picture change correction if in SFX2C).
-    
+    '''The third energy response tensor (with picture change correction if in SFX2C).
+
     Kwargs:
+        freq : tuple
+            The frequency tuple (w1, w2, w3) in a.u. Default is (0, 0, 0).
         picture_change : bool
             Whether to include the picture change correction in SFX2C.
             Default is True.
         solver : str
             The solver to use for the CP-HF/KS equations. Only
-            'direct': Direct method to solve the linear equations;
-            'newton': Newton iterative method with the inverse projected into
+            `direct`: Direct method to solve the linear equations;
+            `newton`: Newton iterative method with the inverse projected into
                       the Krylov subspace; and
-            'krylov': Krylov subspace method to project the solution into the
+            `krylov`: Krylov subspace method to project the solution into the
                       Krylov subspace;
-            are supported. Default is 'krylov'.
+            are supported. Default is `krylov`.
     '''
     assert isinstance(freq, tuple) and len(freq) == 3
     log = logger.new_logger(pl)
@@ -78,55 +80,41 @@ def hyperpolarizability(pl:'GHFPolar', freq=(0,0,0), **kwargs):
             dm1 = pl.get_dm1(mo1, freq[0])
             nao = dm0.shape[-1]
             cur_mem = lib.current_memory()[0]
-            max_memory = max(2000, mf.max_memory*.8 - cur_mem)
-            
+            max_mem = max(2000, mf.max_memory*.8 - cur_mem)
+
             if xctype == 'LDA':
-                if isinstance(mf, DKS):
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory,
-                                               with_s=True)
-                else:
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory)
-
-                if col[0] == 'm': 
-                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
-                else:
-                    eval_xc = ni.eval_xc_eff
-                
-                for ao, mask, weight, coords in block_loop:
-                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype, hermi=1).real
-                    rho1 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                        hermi=freq[0]==0), col) for dm in dm1])
-                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3]
-                    kxc = kxc[:,0,:,0,:,0] * weight
-                    beta -= lib.einsum('xag,ybg,zcg,abcg->xyz', rho1, rho1, rho1, kxc)
-
-            elif xctype == 'GGA' or 'MGGA':
-                if isinstance(mf, DKS):
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory,
-                                               with_s=True)
-                else:
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory)
-
-                if col[0] == 'm': 
-                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
-                else:
-                    eval_xc = ni.eval_xc_eff
-                
-                for ao, mask, weight, coords in block_loop:
-                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
-                                       hermi=1, with_lapl=False).real
-                    rho1 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                        hermi=freq[0]==0, with_lapl=False), col)
-                                        for dm in dm1])
-                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
-                    beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz',
-                                       rho1, rho1, rho1, kxc)
-
-            elif xctype == 'HF':
-                pass
-
+                deriv = 0
+            elif xctype in ('GGA', 'MGGA'):
+                deriv = 1
             else:
                 raise NotImplementedError(xctype)
+                
+            if isinstance(mf, DKS):
+                block_loop = ni.block_loop(mol, mf.grids, nao, deriv, max_mem,
+                                           with_s=True)
+            else:
+                block_loop = ni.block_loop(mol, mf.grids, nao, deriv, max_mem)
+            
+            if col[0] == 'm': 
+                eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
+            else:
+                eval_xc = ni.eval_xc_eff
+            
+            for ao, mask, weight, coords in block_loop:
+                rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
+                                   hermi=1, with_lapl=False).real
+                rho1 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                    hermi=freq[0]==0, with_lapl=False), col)
+                                    for dm in dm1])
+                kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
+
+                if xctype == 'LDA':
+                    kxc = kxc[:,0,:,0,:,0]
+                    beta -= lib.einsum('xag,ybg,zcg,abcg->xyz',
+                                       rho1, rho1, rho1, kxc)
+                else:
+                    beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz',
+                                       rho1, rho1, rho1, kxc)
 
     elif len(set(freq)) == 2: # b(we,we,wi) -> b(we,wi,we) / b(wi,we,we)
         we = next(f for f in set(freq) if freq.count(f) == 2)
@@ -185,60 +173,44 @@ def hyperpolarizability(pl:'GHFPolar', freq=(0,0,0), **kwargs):
             dm1i = pl.get_dm1(mo1i, wi)
             nao = dm0.shape[-1]
             cur_mem = lib.current_memory()[0]
-            max_memory = max(2000, mf.max_memory*.8 - cur_mem)
+            max_mem = max(2000, mf.max_memory*.8 - cur_mem)
 
             if xctype == 'LDA':
-                if isinstance(mf, DKS):
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory,
-                                               with_s=True)
-                else:
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory)
-
-                if col[0] == 'm': 
-                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
-                else:
-                    eval_xc = ni.eval_xc_eff
-                
-                for ao, mask, weight, coords in block_loop:
-                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype, hermi=1).real
-                    rho1e = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                         hermi=we==0), col) for dm in dm1e])
-                    rho1i = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                         hermi=wi==0), col) for dm in dm1i])
-                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3]
-                    kxc = kxc[:,0,:,0,:,0] * weight
-                    beta -= lib.einsum('xag,ybg,zcg,abcg->xyz', rho1e, rho1e, rho1i, kxc)
-            
-            elif xctype == 'GGA' or 'MGGA':
-                if isinstance(mf, DKS):
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory,
-                                               with_s=True)
-                else:
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory)
-
-                if col[0] == 'm': 
-                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
-                else:
-                    eval_xc = ni.eval_xc_eff
-                
-                for ao, mask, weight, coords in block_loop:
-                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
-                                       hermi=1, with_lapl=False).real
-                    rho1e = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                         hermi=we==0, with_lapl=False), col)
-                                         for dm in dm1e])
-                    rho1i = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                         hermi=wi==0, with_lapl=False), col)
-                                         for dm in dm1i])
-                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
-                    beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz',
-                                       rho1e, rho1e, rho1i, kxc)
-            
-            elif xctype == 'HF':
-                pass
-
+                deriv = 0
+            elif xctype in ('GGA', 'MGGA'):
+                deriv = 1
             else:
                 raise NotImplementedError(xctype)
+
+            if isinstance(mf, DKS):
+                block_loop = ni.block_loop(mol, mf.grids, nao, deriv, max_mem,
+                                           with_s=True)
+            else:
+                block_loop = ni.block_loop(mol, mf.grids, nao, deriv, max_mem)
+
+            if col[0] == 'm': 
+                eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
+            else:
+                eval_xc = ni.eval_xc_eff
+                
+            for ao, mask, weight, coords in block_loop:
+                rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
+                                   hermi=1, with_lapl=False).real
+                rho1e = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                     hermi=we==0, with_lapl=False), col)
+                                     for dm in dm1e])
+                rho1i = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                     hermi=wi==0, with_lapl=False), col)
+                                     for dm in dm1i])
+                kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
+
+                if xctype == 'LDA':
+                    kxc = kxc[:,0,:,0,:,0]
+                    beta -= lib.einsum('xag,ybg,zcg,abcg->xyz',
+                                       rho1e, rho1e, rho1i, kxc)
+                else:
+                    beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz',
+                                       rho1e, rho1e, rho1i, kxc)
 
         if   freq.index(wi) == 1: beta = beta.transpose(0,2,1)
         elif freq.index(wi) == 0: beta = beta.transpose(2,1,0)
@@ -317,75 +289,59 @@ def hyperpolarizability(pl:'GHFPolar', freq=(0,0,0), **kwargs):
             dm12 = pl.get_dm1(mo12, freq[2])
             nao = dm0.shape[-1]
             cur_mem = lib.current_memory()[0]
-            max_memory = max(2000, mf.max_memory*.8 - cur_mem)
+            max_mem = max(2000, mf.max_memory*.8 - cur_mem)
 
             if xctype == 'LDA':
-                if isinstance(mf, DKS):
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory,
-                                               with_s=True)
-                else:
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 0, max_memory)
-                
-                if col[0] == 'm': 
-                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
-                else:
-                    eval_xc = ni.eval_xc_eff
-                
-                for ao, mask, weight, coords in block_loop:
-                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype, hermi=1).real
-                    rho10 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                         hermi=freq[0]==0), col) for dm in dm10])
-                    rho11 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                         hermi=freq[1]==0), col) for dm in dm11])
-                    rho12 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                         hermi=freq[2]==0), col) for dm in dm12])
-                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3]
-                    kxc = kxc[:,0,:,0,:,0] * weight
-                    beta -= lib.einsum('xag,ybg,zcg,abcg->xyz', rho10, rho11, rho12, kxc)
-            
-            elif xctype == 'GGA' or 'MGGA':
-                if isinstance(mf, DKS):
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory,
-                                               with_s=True)
-                else:
-                    block_loop = ni.block_loop(mol, mf.grids, nao, 1, max_memory)
-                
-                if col[0] == 'm': 
-                    eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
-                else:
-                    eval_xc = ni.eval_xc_eff
-                
-                for ao, mask, weight, coords in block_loop:
-                    rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
-                                       hermi=1, with_lapl=False).real
-                    rho10 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                         hermi=freq[0]==0, with_lapl=False), col)
-                                         for dm in dm10])
-                    rho11 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                         hermi=freq[1]==0, with_lapl=False), col)
-                                         for dm in dm11])
-                    rho12 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
-                                         hermi=freq[2]==0, with_lapl=False), col)
-                                         for dm in dm12])
-                    kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
-                    beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz',
-                                       rho10, rho11, rho12, kxc)
-            
-            elif xctype == 'HF':
-                pass
-
+                deriv = 0
+            elif xctype in ('GGA', 'MGGA'):
+                deriv = 1
             else:
                 raise NotImplementedError(xctype)
+            
+            if isinstance(mf, DKS):
+                block_loop = ni.block_loop(mol, mf.grids, nao, deriv, max_mem,
+                                           with_s=True)
+            else:
+                block_loop = ni.block_loop(mol, mf.grids, nao, deriv, max_mem)
+            
+            if col[0] == 'm': 
+                eval_xc = ni.mcfun_eval_xc_adapter(mf.xc)
+            else:
+                eval_xc = ni.eval_xc_eff
+                
+            for ao, mask, weight, coords in block_loop:
+                rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
+                                   hermi=1, with_lapl=False).real
+                rho10 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                     hermi=freq[0]==0, with_lapl=False), col)
+                                     for dm in dm10])
+                rho11 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                     hermi=freq[1]==0, with_lapl=False), col)
+                                     for dm in dm11])
+                rho12 = numpy.array([rho_eff(ni.eval_rho(mol, ao, dm, mask, xctype,
+                                     hermi=freq[2]==0, with_lapl=False), col)
+                                     for dm in dm12])
+                kxc = eval_xc(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
+
+                if xctype == 'LDA':
+                    kxc = kxc[:,0,:,0,:,0]
+                    beta -= lib.einsum('xag,ybg,zcg,abcg->xyz',
+                                       rho10, rho11, rho12, kxc)
+                else:
+                    beta -= lib.einsum('xaig,ybjg,zckg,aibjckg->xyz',
+                                       rho10, rho11, rho12, kxc)
 
     if mf.verbose >= logger.INFO:
-        log.debug(f'Hyperpolarizability tensor b{freq}')
+        log.debug(f'The third energy response tensor b{freq}')
         log.debug(f'{beta}')
     
     return beta.real
 
 def _dirac_relation(mat):
-    '''Make a tensor product --- sprsp = is prp + I2 prp.
-       np.einsum performs better than np.kron in most cases.'''
+    '''[[ W0 + iWz], [Wy + iWx],
+        [-Wy + iWx], [W0 - iWz]].
+
+    np.einsum performs better than np.kron in most cases.'''
     quaternion = numpy.vstack([1j * lib.PauliMatrices, numpy.eye(2)[None]])
     qshape = quaternion.shape # shape: (4,2,2)
     mshape = mat.shape # shape: (3,4,nao,nao)
@@ -417,7 +373,7 @@ class GHFPolar(RHFPolar):
                 nao = ao_dip.shape[-1]
                 ao_dip = lib.einsum('ij,xpq->xipjq', numpy.eye(2), ao_dip)
                 ao_dip = ao_dip.reshape(3,2*nao,2*nao)
-        return -ao_dip
+        return ao_dip
 
     hyperpolar = hyperpolarizability = hyperpolarizability
 
@@ -440,7 +396,7 @@ if __name__ == '__main__':
     def apply_E(E):
         mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
-        return -mf.dip_moment(mol, mf.make_rdm1(), unit_symbol='AU', verbose=0)
+        return mf.dip_moment(mol, mf.make_rdm1(), unit_symbol='AU', verbose=0)
     print(polar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])

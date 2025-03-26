@@ -49,7 +49,7 @@ if __name__ == '__main__':
     def apply_E(E):
         mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
-        return -mf.dip_moment(mol, mf.make_rdm1(), unit='AU', verbose=0)
+        return mf.dip_moment(mol, mf.make_rdm1(), unit='AU', verbose=0)
     print(polar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])

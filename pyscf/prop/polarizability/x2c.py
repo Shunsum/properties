@@ -19,7 +19,7 @@ class X2CPolar(GHFPolar):
                                                      'int1e_sprsp_spinor'))
             else:
                 ao_dip = mol.intor_symmetric('int1e_r_spinor')
-        return -ao_dip
+        return ao_dip
 
 x2c.SCF.Polarizability = lib.class_as_method(X2CPolar)
 
@@ -96,7 +96,7 @@ if __name__ == '__main__':
     def apply_E(E):
         mf.get_hcore = lambda *args, **kwargs: get_hcore(mf, mol, E)
         mf.run(conv_tol=1e-14)
-        return -mf.dip_moment(mol, mf.make_rdm1(), unit_symbol='AU', verbose=0)
+        return mf.dip_moment(mol, mf.make_rdm1(), unit_symbol='AU', verbose=0)
     print(polar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])

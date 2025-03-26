@@ -17,7 +17,7 @@
 #
 
 '''
-Non-relativistic static and dynamic polarizability and hyper-polarizability tensor
+Non-relativistic static and dynamic (hyper)polarizability tensor
 '''
 
 import numpy
@@ -28,43 +28,33 @@ from pyscf.x2c.sfx2c1e import SFX2C1E_SCF
 from pyscf.prop.cphf import CPHFBase
 
 
-def el_dip_moment(pl:'RHFPolar', **kwargs):
-    '''Electronic dipole moment (with picture change correction if in SFX2C).
+def dip_moment(pl:'RHFPolar', **kwargs):
+    '''Dipole moment (with picture change correction if in SFX2C).
     
     Kwargs:
+        unit : str
+            The unit of the dipole moment. Default is 'Debye'.
         picture_change : bool
             Whether to include the picture change correction in SFX2C.'''
-    log = logger.new_logger(pl)
-    mf = pl.mf
-    h1 = pl.get_h1(**kwargs)
-    dm0 = mf.make_rdm1()
-
-    if not (isinstance(dm0, numpy.ndarray) and dm0.ndim == 2):
-        # U-HF/KS density matrices
-        dm0 = dm0[0] + dm0[1]
-    
-    mu = -lib.einsum('xpq,qp->x', h1, dm0)
-
-    if mf.verbose >= logger.INFO:
-        log.note('Electronic dipole moment(X, Y, Z, A.U.): %8.5f, %8.5f, %8.5f', *mu)
-
-    return mu
+    return pl.mf.dip_moment(**kwargs)
 
 def polarizability(pl:'RHFPolar', freq=(0,0), **kwargs):
-    '''Polarizability (with picture change correction if in SFX2C).
+    '''The second energy response tensor (with picture change correction if in SFX2C).
     
     Kwargs:
+        freq : tuple
+            The frequency tuple (w1, w2) in a.u. Default is (0, 0).
         picture_change : bool
             Whether to include the picture change correction in SFX2C.
             Default is True.
         solver : str
             The solver to use for the CP-HF/KS equations. Only
-            'direct': Direct method to solve the linear equations;
-            'newton': Newton iterative method with the inverse projected into
+            `direct`: Direct method to solve the linear equations;
+            `newton`: Newton iterative method with the inverse projected into
                       the Krylov subspace; and
-            'krylov': Krylov subspace method to project the solution into the
+            `krylov`: Krylov subspace method to project the solution into the
                       Krylov subspace;
-            are supported. Default is 'krylov'.
+            are supported. Default is `krylov`.
     '''
     assert isinstance(freq, tuple) and len(freq) == 2
     log = logger.new_logger(pl)
@@ -106,29 +96,31 @@ def polarizability(pl:'RHFPolar', freq=(0,0), **kwargs):
 
     if pl.verbose >= logger.INFO:
         xx, yy, zz = alpha.diagonal()
-        log.note('Isotropic polarizability %.12g', (xx+yy+zz)/3)
-        log.note('Polarizability anisotropy %.12g',
-                 (.5 * ((xx-yy)**2 + (yy-zz)**2 + (zz-xx)**2))**.5)
-        log.debug(f'Polarizability tensor a{freq}')
+        log.note('Isotropy %.12g', (xx+yy+zz)/3)
+        log.note('Anisotropy %.12g', (((xx-yy)**2 + (yy-zz)**2
+                                       + (zz-xx)**2)*.5)**.5)
+        log.debug(f'The second energy response tensor a{freq}')
         log.debug(f'{alpha}')
 
     return alpha*2 if isinstance(pl.mf, hf.RHF) else alpha.real
 
 def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
-    '''(First) Hyperpolarizability (with picture change correction if in SFX2C).
-    
+    '''The third energy response tensor (with picture change correction if in SFX2C).
+
     Kwargs:
+        freq : tuple
+            The frequency tuple (w1, w2, w3) in a.u. Default is (0, 0, 0).
         picture_change : bool
             Whether to include the picture change correction in SFX2C.
             Default is True.
         solver : str
             The solver to use for the CP-HF/KS equations. Only
-            'direct': Direct method to solve the linear equations;
-            'newton': Newton iterative method with the inverse projected into
+            `direct`: Direct method to solve the linear equations;
+            `newton`: Newton iterative method with the inverse projected into
                       the Krylov subspace; and
-            'krylov': Krylov subspace method to project the solution into the
+            `krylov`: Krylov subspace method to project the solution into the
                       Krylov subspace;
-            are supported. Default is 'krylov'.
+            are supported. Default is `krylov`.
     '''
     assert isinstance(freq, tuple) and len(freq) == 3
     log = logger.new_logger(pl)
@@ -168,11 +160,11 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             dm1 = pl.get_dm1(mo1, freq[0])
             nao = dm0.shape[-1]
             cur_mem = lib.current_memory()[0]
-            max_memory = max(2000, mf.max_memory*.8 - cur_mem)
+            max_mem = max(2000, mf.max_memory*.8 - cur_mem)
             
             if xctype == 'LDA':
                 for ao, mask, weight, coords \
-                    in ni.block_loop(mol, mf.grids, nao, 0, max_memory):
+                    in ni.block_loop(mol, mf.grids, nao, 0, max_mem):
                     rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype, hermi=1)
                     rho1 = numpy.array([ni.eval_rho(mol, ao, dm, mask, xctype,
                                         hermi=freq[0]==0) for dm in dm1])
@@ -180,9 +172,9 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
                     kxc = kxc[0,0,0] * weight
                     beta -= lib.einsum('xg,yg,zg,g->xyz', rho1, rho1, rho1, kxc)
 
-            elif xctype == 'GGA' or 'MGGA':
+            elif xctype in ('GGA', 'MGGA'):
                 for ao, mask, weight, coords \
-                    in ni.block_loop(mol, mf.grids, nao, 1, max_memory):
+                    in ni.block_loop(mol, mf.grids, nao, 1, max_mem):
                     rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
                                        hermi=1, with_lapl=False)
                     rho1 = numpy.array([ni.eval_rho(mol, ao, dm, mask, xctype,
@@ -253,11 +245,11 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             dm1i = pl.get_dm1(mo1i, wi)
             nao = dm0.shape[-1]
             cur_mem = lib.current_memory()[0]
-            max_memory = max(2000, mf.max_memory*.8 - cur_mem)
+            max_mem = max(2000, mf.max_memory*.8 - cur_mem)
 
             if xctype == 'LDA':
                 for ao, mask, weight, coords \
-                    in ni.block_loop(mol, mf.grids, nao, 0, max_memory):
+                    in ni.block_loop(mol, mf.grids, nao, 0, max_mem):
                     rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype, hermi=1)
                     rho1e = numpy.array([ni.eval_rho(mol, ao, dm, mask, xctype,
                                          hermi=we==0) for dm in dm1e])
@@ -267,9 +259,9 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
                     kxc = kxc[0,0,0] * weight
                     beta -= lib.einsum('xg,yg,zg,g->xyz', rho1e, rho1e, rho1i, kxc)
             
-            elif xctype == 'GGA' or 'MGGA':
+            elif xctype in ('GGA', 'MGGA'):
                 for ao, mask, weight, coords \
-                    in ni.block_loop(mol, mf.grids, nao, 1, max_memory):
+                    in ni.block_loop(mol, mf.grids, nao, 1, max_mem):
                     rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
                                        hermi=1, with_lapl=False)
                     rho1e = numpy.array([ni.eval_rho(mol, ao, dm, mask, xctype,
@@ -362,11 +354,11 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             dm12 = pl.get_dm1(mo12, freq[2])
             nao = dm0.shape[-1]
             cur_mem = lib.current_memory()[0]
-            max_memory = max(2000, mf.max_memory*.8 - cur_mem)
+            max_mem = max(2000, mf.max_memory*.8 - cur_mem)
 
             if xctype == 'LDA':
                 for ao, mask, weight, coords \
-                    in ni.block_loop(mol, mf.grids, nao, 0, max_memory):
+                    in ni.block_loop(mol, mf.grids, nao, 0, max_mem):
                     rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype, hermi=1)
                     rho10 = numpy.array([ni.eval_rho(mol, ao, dm, mask, xctype,
                                          hermi=freq[0]==0) for dm in dm10])
@@ -378,9 +370,9 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
                     kxc = kxc[0,0,0] * weight
                     beta -= lib.einsum('xg,yg,zg,g->xyz', rho10, rho11, rho12, kxc)
             
-            elif xctype == 'GGA' or 'MGGA':
+            elif xctype in ('GGA', 'MGGA'):
                 for ao, mask, weight, coords \
-                    in ni.block_loop(mol, mf.grids, nao, 1, max_memory):
+                    in ni.block_loop(mol, mf.grids, nao, 1, max_mem):
                     rho0 = ni.eval_rho(mol, ao, dm0, mask, xctype,
                                        hermi=1, with_lapl=False)
                     rho10 = numpy.array([ni.eval_rho(mol, ao, dm, mask, xctype,
@@ -402,16 +394,16 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
                 raise NotImplementedError(xctype)
 
     if mf.verbose >= logger.INFO:
-        log.debug(f'Hyperpolarizability tensor b{freq}')
+        log.debug(f'The third energy response tensor b{freq}')
         log.debug(f'{beta}')
     
     return beta
 
 
 class RHFPolar(CPHFBase):
-    def get_h1(pl, picture_change=True, **kwargs):
+    def get_h1(self, picture_change=True, **kwargs):
         '''The dipole matrix in AO basis.'''
-        mf = pl.mf
+        mf = self.mf
         mol = mf.mol
         charges = mol.atom_charges()
         coords  = mol.atom_coords()
@@ -425,9 +417,9 @@ class RHFPolar(CPHFBase):
                 ao_dip = mf.with_x2c.picture_change(('int1e_r', prp*c1**2))
             else:
                 ao_dip = mol.intor_symmetric('int1e_r', comp=3)
-        return -ao_dip
+        return ao_dip
 
-    dipole = el_dip_moment = el_dip_moment
+    dip_moment = dip_moment
     polar = polarizability = polarizability
     hyperpolar = hyperpolarizability = hyperpolarizability
 
@@ -450,7 +442,7 @@ if __name__ == '__main__':
     def apply_E(E):
         mf.get_hcore = lambda *args, **kwargs: hcore + lib.einsum('x,xuv->uv', E, h1)
         mf.run(conv_tol=1e-14)
-        return -mf.dip_moment(mol, mf.make_rdm1(), unit='AU', verbose=0)
+        return mf.dip_moment(mol, mf.make_rdm1(), unit='AU', verbose=0)
     print(polar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])
