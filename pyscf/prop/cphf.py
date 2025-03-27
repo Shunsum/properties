@@ -270,8 +270,14 @@ class CPHFBase(lib.StreamObject):
                 except KeyError: mo11 = self.solve_mo1(freq=freq[1], **kwargs)
                 dm11 = self.get_dm1(mo11, freq[1])
             
-            f2 += ni.get_kxc(mf.mol, mf.grids, mf.xc, dm0, (dm10,dm11),
-                             (freq[0]==0,freq[1]==0), max_memory)
+            try:
+                f2 += ni.get_kxc(mf.mol, mf.grids, mf.xc, dm0, (dm10,dm11),
+                                 (freq[0]==0,freq[1]==0), max_memory)
+            except NotImplementedError:
+                f2 += ni.get_kxc(mf.mol, mf.grids, mf.xc, dm0, (dm10.real,
+                                 dm11.real), (freq[0]==0,freq[1]==0), max_memory)
+                f2 += ni.get_kxc(mf.mol, mf.grids, mf.xc, dm0, (dm10.imag,
+                                 dm11.imag), (freq[0]==0,freq[1]==0), max_memory) * 1j
 
         if hasattr(self, 'get_h2'):
             f2 += self.get_h2(**kwargs)
@@ -1032,7 +1038,7 @@ class UCPHFBase(CPHFBase):
                 dm1b = lib.einsum('pj,xji,qi->xpq', mo_coeff[1], mo1b[0], orbob.conj())
                 dm1b+= lib.einsum('pi,xji,qj->xpq', orbob, mo1b[1], mo_coeff[1].conj())
 
-        return (dm1a, dm1b)
+        return numpy.array((dm1a, dm1b))
 
     def get_dm2(self, mo2=None, freq=(0,0), with_mo1=True, with_mo2=True, **kwargs):
         '''The second-order density matrix in AO basis.'''
@@ -1214,7 +1220,7 @@ class UCPHFBase(CPHFBase):
                 dm2a += dm21a.reshape(9,*dm21a.shape[-2:])
                 dm2b += dm21b.reshape(9,*dm21b.shape[-2:])
         
-        return (dm2a, dm2b)
+        return numpy.array((dm2a, dm2b))
 
     def get_e1(self, mo1=None, freq=0, **kwargs):
         '''The first-order energy for the occ.-occ. block.'''

@@ -412,9 +412,18 @@ class RHFPolar(CPHFBase):
             if isinstance(mf, SFX2C1E_SCF) and picture_change:
                 xmol = mf.with_x2c.get_xmol()[0]
                 nao = xmol.nao
-                prp = xmol.intor_symmetric('int1e_sprsp').reshape(3,4,nao,nao)[:,3]
-                c1 = 0.5/lib.param.LIGHT_SPEED
-                ao_dip = mf.with_x2c.picture_change(('int1e_r', prp*c1**2))
+                c = 0.5/lib.param.LIGHT_SPEED
+                v1 = xmol.intor_symmetric('int1e_r')
+                if mf.make_rdm1().ndim == 2: # R-SFX2C
+                    w1 = xmol.intor_symmetric('int1e_sprsp').reshape(3,4,nao,nao)[:,3]
+                    ao_dip = mf.with_x2c.picture_change((v1, w1*c**2))
+                else: # U-SFX2C
+                    w1 = xmol.intor_symmetric('int1e_sprsp').reshape(3,4,nao,nao)[:,2:]
+                    w1a = w1[:,0] + w1[:,1] * 1j
+                    w1b = w1[:,0] - w1[:,1] * 1j
+                    ao_dipa = mf.with_x2c.picture_change((v1, w1a*c**2))
+                    ao_dipb = mf.with_x2c.picture_change((v1, w1b*c**2))
+                    ao_dip = numpy.array((ao_dipa, ao_dipb))
             else:
                 ao_dip = mol.intor_symmetric('int1e_r', comp=3)
         return ao_dip

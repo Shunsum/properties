@@ -366,8 +366,8 @@ class GHFPolar(RHFPolar):
                 ao_dip = ao_dip.reshape(3,2*nao,2*nao)
                 prp = xmol.intor_symmetric('int1e_sprsp').reshape(3,4,nao,nao)
                 prp = _dirac_relation(prp)
-                c = lib.param.LIGHT_SPEED
-                ao_dip = mf.with_x2c.picture_change((ao_dip, prp/(2*c)**2))
+                c = 0.5/lib.param.LIGHT_SPEED
+                ao_dip = mf.with_x2c.picture_change((ao_dip, prp*c**2))
             else:
                 ao_dip = mol.intor_symmetric('int1e_r', comp=3)
                 nao = ao_dip.shape[-1]

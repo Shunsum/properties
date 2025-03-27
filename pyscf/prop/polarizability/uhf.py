@@ -100,7 +100,7 @@ def polarizability(pl:'UHFPolar', freq=(0,0), **kwargs):
         log.debug(f'The second energy response tensor a{freq}')
         log.debug(f'{alpha}')
 
-    return alpha
+    return alpha.real
 
 def hyperpolarizability(pl:'UHFPolar', freq=(0,0,0), **kwargs):
     '''The third energy response tensor (with picture change correction if in SFX2C).
@@ -467,7 +467,7 @@ def hyperpolarizability(pl:'UHFPolar', freq=(0,0,0), **kwargs):
         log.debug(f'The third energy response tensor b{freq}')
         log.debug(f'{beta}')
     
-    return beta
+    return beta.real
 
 
 class UHFPolar(UCPHFBase, RHFPolar):
