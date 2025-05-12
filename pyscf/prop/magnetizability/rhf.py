@@ -26,6 +26,8 @@ from pyscf.lib import logger
 from pyscf.scf import hf, jk, _response_functions  # noqa
 from pyscf.prop.nmr import rhf as rhf_nmr
 from pyscf.prop.cphf import CPHFBase
+from pyscf.prop.polarizability.rhf import polar, hyperpolar
+from pyscf.x2c.sfx2c1e import SFX2C1E_SCF
 from pyscf.data import nist
 
 
@@ -279,6 +281,204 @@ class Magnetizability(CPHFBase):
         mol = self.mol
         return get_s1(mol)
 
+class RHFMagnet(CPHFBase):
+    def get_h1(self, picture_change=True, **kwargs):
+        '''The angular momentum matrix in AO basis.'''
+        mf = self.mf
+        mol = mf.mol
+        with mol.with_common_orig((0,0,0)):
+            if isinstance(mf, SFX2C1E_SCF) and picture_change:
+                xmol = mf.with_x2c.get_xmol()[0]
+                nao = xmol.nao
+                c = 0.5/lib.param.LIGHT_SPEED
+                t1 = xmol.intor_asymmetric('int1e_cg_irxp') * -.5j
+                if mf.make_rdm1().ndim == 2: # R-SFX2C
+                    w1 = xmol.intor('int1e_cg_sa10nucsp').reshape(3,4,nao,nao)[:,3]
+                    w1 = w1 * c**2 * -1j
+                    w1+= w1.transpose(0,2,1).conj()
+                    w1-= t1
+                    ang_mom = mf.with_x2c.picture_change((None, w1), t1)
+                else: # U-SFX2C
+                    sz = xmol.intor_symmetric('int1e_ovlp') * .5
+                    t1a = t1.copy()
+                    t1b = t1.copy()
+                    t1a[2] += sz
+                    t1b[2] -= sz
+                    w1 = xmol.intor('int1e_cg_sa10nucsp').reshape(3,4,nao,nao)[:,2:]
+                    w1*= c**2
+                    w1a = w1[:,1] * -1j + w1[:,0]  # W0 + iWz
+                    w1b = w1[:,1] * -1j - w1[:,0]  # W0 - iWz
+                    w1a+= w1a.transpose(0,2,1).conj()
+                    w1b+= w1b.transpose(0,2,1).conj()
+                    w1a-= t1a
+                    w1b-= t1b
+                    ang_moma = mf.with_x2c.picture_change((None, w1a), t1a)
+                    ang_momb = mf.with_x2c.picture_change((None, w1b), t1b)
+                    ang_mom = numpy.array((ang_moma, ang_momb))
+            else:
+                ang_mom = mol.intor_asymmetric('int1e_cg_irxp') * -.5j
+                if mf.make_rdm1().ndim != 2:
+                    sz = mol.intor_symmetric('int1e_ovlp') * .5
+                    ang_mom = numpy.array((ang_mom, ang_mom))
+                    ang_mom[0,2] += sz
+                    ang_mom[1,2] -= sz
+        return ang_mom
+    
+    def get_h2(self, picture_change=True, **kwargs):
+        '''The diamagnetic Hamiltionian in AO basis.'''
+        mf = self.mf
+        mol = mf.mol
+        with mol.with_common_orig((0,0,0)):
+            if isinstance(mf, SFX2C1E_SCF) and picture_change:
+                raise NotImplementedError('X2C h2 integrals not implemented')
+            else:
+                nao = mol.nao
+                h2 = mol.intor_symmetric('int1e_rr').reshape(3,3,nao,nao) * .25
+                h2 = lib.einsum('xy,zzuv->xyuv', numpy.eye(3), h2) - h2
+        return h2.reshape(9,nao,nao)
+    
+    def mag_moment(self, **kwargs):
+        '''Electronic magnetic moment in A.U.
+        Multiply by 2 to convert to the Bohr magneton.'''
+        log = logger.new_logger(self, self.verbose)
+
+        dm = self.mf.make_rdm1()
+        ang_mom = self.get_h1(**kwargs)
+        if isinstance(dm, numpy.ndarray) and dm.ndim == 2:
+            ang_mom = -numpy.einsum('vu,xuv->x', dm, ang_mom).real
+        else: # UHF density matrices
+            ang_mom = -numpy.einsum('svu,sxuv->x', dm, ang_mom).real
+
+        log.note('Magnetic moment(X, Y, Z, A.U.): %8.6g, %8.6g, %8.6g', *ang_mom)
+        return ang_mom
+    
+    pmag = polar
+    pmag.__doc__ = pmag.__doc__.replace('polarizability',
+                                        'para-magnetizability')
+    
+    def dmag(self, **kwargs):
+        '''The dia-magnetizability tensor (with picture change correction if in X2C).
+        
+        Kwargs:
+            picture_change : bool
+                Whether to include the picture change correction in SFX2C.
+                Default is True.
+        '''
+        log = logger.new_logger(self, self.verbose)
+
+        dm = self.mf.make_rdm1()
+        if not (isinstance(dm, numpy.ndarray) and dm.ndim == 2):
+            # UHF density matrices
+            dm = dm[0] + dm[1]
+        h2 = self.get_h2(mol, **kwargs)
+        xi = -lib.einsum('vu,xuv->x', dm, h2).real.reshape(3,3)
+
+        log.info('The diamagnetic magnetizability in A.U.')
+        log.info(f'{xi}')
+        if self.verbose >= logger.DEBUG:
+            xx, yy, zz = xi.diagonal()
+            log.debug(f'Isotropic diamagnetic magnetizability: {(xx+yy+zz)/3:.6g}')
+            ani = ( ( (xx-yy)**2 + (yy-zz)**2 + (zz-xx)**2 ) *.5 ) ** .5
+            log.debug(f'Anisotropic diamagnetic magnetizability: {ani:.6g}')
+        return xi
+    
+    @lib.with_doc(pmag.__doc__.replace('para-', ''))
+    def magnet(self, freq=(0,0), **kwargs):
+        log = logger.new_logger(self, self.verbose)
+
+        pmag = self.pmag(freq, **kwargs)
+        dmag = self.dmag(**kwargs)
+        tmag = pmag + dmag
+
+        log.info(f'The total magnetizability with frequencies {freq} in A.U.')
+        log.info(f'{tmag}')
+        if self.verbose >= logger.DEBUG:
+            xx, yy, zz = tmag.diagonal()
+            log.debug(f'Isotropic total magnetizability: {(xx+yy+zz)/3:.6g}')
+            ani = ( ( (xx-yy)**2 + (yy-zz)**2 + (zz-xx)**2 ) *.5 ) ** .5
+            log.debug(f'Anisotropic total magnetizability: {ani:.6g}')
+        return tmag
+    mag = magnet
+
+    hyperpmag = hyperpolar
+    hyperpmag.__doc__ = hyperpmag.__doc__.replace('hyperpolarizability',
+                                                  'para-hypermagnetizability')
+    
+    @lib.with_doc(hyperpmag.__doc__.replace('para', 'dia'))
+    def hyperdmag(self, freq=(0,0,0), **kwargs):
+        log = logger.new_logger(self, self.verbose)
+        h2 = self.get_h2(**kwargs)
+        h2 = h2.reshape(3,3,*h2.shape[-2:])
+        
+        if freq[0] == freq[1] == freq[2]:
+            dm1 = self.get_dm1(freq=freq[0], **kwargs)
+            if not (isinstance(dm1, numpy.ndarray) and dm1.ndim == 3):
+                # UHF density matrices
+                dm1 = dm1[0] + dm1[1]
+            dmag = -lib.einsum('xvu,yzuv->xyz', dm1, h2)
+            dmag += dmag.transpose(1,0,2) + dmag.transpose(2,0,1)
+        
+        elif len(set(freq)) == 2:
+            we = next(f for f in set(freq) if freq.count(f) == 2)
+            wi = next(f for f in set(freq) if f != we)
+            dm1e = self.get_dm1(freq=we, **kwargs)
+            dm1i = self.get_dm1(freq=wi, **kwargs)
+            if not (isinstance(dm1e, numpy.ndarray) and dm1e.ndim == 3):
+                # UHF density matrices
+                dm1e = dm1e[0] + dm1e[1]
+                dm1i = dm1i[0] + dm1i[1]
+            dmag = -lib.einsum('xvu,yzuv->xyz', dm1e, h2)
+            dmag += dmag.transpose(1,0,2)
+            dmag -= lib.einsum('zvu,xyuv->xyz', dm1i, h2)
+            if   freq.index(wi) == 1: dmag = dmag.transpose(0,2,1)
+            elif freq.index(wi) == 0: dmag = dmag.transpose(2,1,0)
+
+        else:
+            dm10 = self.get_dm1(freq=freq[0], **kwargs)
+            dm11 = self.get_dm1(freq=freq[1], **kwargs)
+            dm12 = self.get_dm1(freq=freq[2], **kwargs)
+            if not (isinstance(dm10, numpy.ndarray) and dm10.ndim == 3):
+                # UHF density matrices
+                dm10 = dm10[0] + dm10[1]
+                dm11 = dm11[0] + dm11[1]
+                dm12 = dm12[0] + dm12[1]
+            dmag = -lib.einsum('xvu,yzuv->xyz', dm10, h2)
+            dmag -= lib.einsum('yvu,xzuv->xyz', dm11, h2)
+            dmag -= lib.einsum('zvu,xyuv->xyz', dm12, h2)
+        
+        log.info('The diamagnetic hypermagnetizability '
+                 f'with frequencies {freq} in A.U.')
+        log.info(f'{dmag}')
+        if self.verbose >= logger.DEBUG:
+            mgn1 = lib.einsum('ijj->i', dmag)
+            mgn2 = lib.einsum('jij->i', dmag)
+            mgn3 = lib.einsum('jji->i', dmag)
+            mgn = lib.norm((mgn1 + mgn2 + mgn3)/3)
+            log.debug('The magnitude of the diamagnetic '
+                      f'hypermagnetizability: {mgn:.6g}')
+        
+        return dmag
+    
+    @lib.with_doc(hyperpmag.__doc__.replace('para-', ''))
+    def hypermagnet(self, freq=(0,0,0), **kwargs):
+        log = logger.new_logger(self, self.verbose)
+
+        pmag = self.hyperpmag(freq, **kwargs)
+        dmag = self.hyperdmag(freq, **kwargs)
+        tmag = pmag + dmag
+
+        log.info('The total hypermagnetizability '
+                 f'with frequencies {freq} in A.U.')
+        log.info(f'{tmag}')
+        if self.verbose >= logger.DEBUG:
+            mgn1 = lib.einsum('ijj->i', tmag)
+            mgn2 = lib.einsum('jij->i', tmag)
+            mgn3 = lib.einsum('jji->i', tmag)
+            mgn = lib.norm((mgn1 + mgn2 + mgn3)/3)
+            log.debug('The magnitude of the total '
+                      f'hypermagnetizability: {mgn:.6g}')
+        return tmag
+    hypermag = hypermagnet
 
 if __name__ == '__main__':
     from pyscf import gto

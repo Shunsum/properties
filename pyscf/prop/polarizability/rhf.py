@@ -23,7 +23,7 @@ Non-relativistic static and dynamic (hyper)polarizability tensor
 import numpy
 from pyscf import lib
 from pyscf.lib import logger
-from pyscf.scf import hf, _response_functions
+from pyscf.scf import hf
 from pyscf.x2c.sfx2c1e import SFX2C1E_SCF
 from pyscf.prop.cphf import CPHFBase
 
@@ -38,8 +38,8 @@ def dip_moment(pl:'RHFPolar', **kwargs):
             Whether to include the picture change correction in SFX2C.'''
     return pl.mf.dip_moment(**kwargs)
 
-def polarizability(pl:'RHFPolar', freq=(0,0), **kwargs):
-    '''The second energy response tensor (with picture change correction if in SFX2C).
+def polar(pl:'RHFPolar', freq=(0,0), **kwargs):
+    '''The polarizability tensor (with picture change correction if in X2C).
     
     Kwargs:
         freq : tuple
@@ -57,7 +57,7 @@ def polarizability(pl:'RHFPolar', freq=(0,0), **kwargs):
             are supported. Default is `krylov`.
     '''
     assert isinstance(freq, tuple) and len(freq) == 2
-    log = logger.new_logger(pl)
+    log = logger.new_logger(pl, pl.verbose)
     if pl.with_s1:
         h1 = pl._to_to(pl.get_h1(**kwargs))
     else:
@@ -67,20 +67,20 @@ def polarizability(pl:'RHFPolar', freq=(0,0), **kwargs):
         try: mo1 = pl.mo1[0]
         except KeyError: mo1 = pl.solve_mo1(0, **kwargs)
     
-        alpha = -lib.einsum('xji,yji->xy', h1.conj(), mo1) * .5
-        alpha += alpha.conj()
-        alpha += alpha.T
+        e2 = -lib.einsum('xji,yji->xy', h1.conj(), mo1) * .5
+        e2 += e2.conj()
+        e2 += e2.T
 
     elif abs(freq[0]) == abs(freq[1]): # a(w,w) / a(-w,w) / a(w,-w)
         try: mo1 = pl.mo1[freq[1]]
         except KeyError: mo1 = pl.solve_mo1(freq[1], **kwargs)
 
-        alpha = -lib.einsum('sxji,syji->xy', (h1.conj(),h1), mo1) * .5
+        e2 = -lib.einsum('sxji,syji->xy', (h1.conj(),h1), mo1) * .5
         if freq[0] == freq[1]:
-            alpha += alpha.T
+            e2 += e2.T
         else:
-            alpha += alpha.T.conj()
-            alpha += lib.einsum('sxji,syji,s->xy', mo1.conj(), mo1, freq)
+            e2 += e2.T.conj()
+            e2 += lib.einsum('sxji,syji,s->xy', mo1.conj(), mo1, freq)
     
     else: # a(w1,w2)
         try: mo10 = pl.mo1[freq[0]]
@@ -89,23 +89,27 @@ def polarizability(pl:'RHFPolar', freq=(0,0), **kwargs):
         except KeyError: mo11 = pl.solve_mo1(freq[1], **kwargs)
 
         h1 = (h1.conj(), h1)
-        alpha = -lib.einsum('syji,sxji->xy', h1, mo10)
-        alpha -= lib.einsum('sxji,syji->xy', h1, mo11)
-        alpha += lib.einsum('xji,yji->xy', mo10[0], mo11[1]) * (freq[0]-freq[1])
-        alpha += lib.einsum('xji,yji->xy', mo10[1], mo11[0]) * (freq[1]-freq[0])
+        e2 = -lib.einsum('syji,sxji->xy', h1, mo10)
+        e2 -= lib.einsum('sxji,syji->xy', h1, mo11)
+        e2 += lib.einsum('xji,yji->xy', mo10[0], mo11[1]) * (freq[0]-freq[1])
+        e2 += lib.einsum('xji,yji->xy', mo10[1], mo11[0]) * (freq[1]-freq[0])
 
-    if pl.verbose >= logger.INFO:
-        xx, yy, zz = alpha.diagonal()
-        log.note('Isotropy %.12g', (xx+yy+zz)/3)
-        log.note('Anisotropy %.12g', (((xx-yy)**2 + (yy-zz)**2
-                                       + (zz-xx)**2)*.5)**.5)
-        log.debug(f'The second energy response tensor a{freq}')
-        log.debug(f'{alpha}')
+    e2 = e2.real*2 if isinstance(pl.mf, hf.RHF) else e2.real
 
-    return alpha*2 if isinstance(pl.mf, hf.RHF) else alpha.real
+    if isinstance(pl, RHFPolar): pm = "polarizability"
+    else: pm = "paramagnetic magnetizability"
+    log.info(f'The {pm} with frequencies {freq} in A.U.')
+    log.info(f'{e2}')
+    if pl.verbose >= logger.DEBUG:
+        xx, yy, zz = e2.diagonal()
+        log.debug(f'Isotropic {pm}: {(xx+yy+zz)/3:.6g}')
+        ani = ( ( (xx-yy)**2 + (yy-zz)**2 + (zz-xx)**2 ) *.5 ) ** .5
+        log.debug(f'Anisotropic {pm}: {ani:.6g}')
 
-def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
-    '''The third energy response tensor (with picture change correction if in SFX2C).
+    return e2
+
+def hyperpolar(pl:'RHFPolar', freq=(0,0,0), **kwargs):
+    '''The hyperpolarizability tensor (with picture change correction if in X2C).
 
     Kwargs:
         freq : tuple
@@ -123,7 +127,7 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             are supported. Default is `krylov`.
     '''
     assert isinstance(freq, tuple) and len(freq) == 3
-    log = logger.new_logger(pl)
+    log = logger.new_logger(pl, pl.verbose)
     mf = pl.mf
 
     if freq[0] == freq[1] == freq[2]: # b(0,0,0) / b(w,w,w)
@@ -134,22 +138,22 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
         f1oo = pl._to_oo(f1)
         
         if freq[0] == 0:
-            beta = -lib.einsum('xjl,yli,zji->xyz', f1vv, mo1, mo1.conj())
-            beta += lib.einsum('xik,yji,zjk->xyz', f1oo, mo1, mo1.conj())
+            e3 = -lib.einsum('xjl,yli,zji->xyz', f1vv, mo1, mo1.conj())
+            e3 += lib.einsum('xik,yji,zjk->xyz', f1oo, mo1, mo1.conj())
         else:
-            beta = -lib.einsum('xjl,yli,zji->xyz', f1vv, mo1[0], mo1[1])
-            beta += lib.einsum('xik,yji,zjk->xyz', f1oo, mo1[0], mo1[1])
+            e3 = -lib.einsum('xjl,yli,zji->xyz', f1vv, mo1[0], mo1[1])
+            e3 += lib.einsum('xik,yji,zjk->xyz', f1oo, mo1[0], mo1[1])
 
             try: mo2 = pl.mo2[freq[1:]]
             except KeyError: mo2 = pl.solve_mo2(freq[1:], **kwargs)
             mo2 = mo2[...,mf.mo_occ==0,:]
             mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
             mo2[0] *= -1
-            beta += lib.einsum('syzji,sxji->xyz', mo2, mo1[[1,0]]) * freq[0] * .5
+            e3 += lib.einsum('syzji,sxji->xyz', mo2, mo1[[1,0]]) * freq[0] * .5
         
-        beta += beta.transpose(0,2,1) + beta.transpose(1,0,2) + \
-                beta.transpose(1,2,0) + beta.transpose(2,0,1) + beta.transpose(2,1,0)
-        beta *= 2
+        e3 += e3.transpose(0,2,1) + e3.transpose(1,0,2) + \
+              e3.transpose(1,2,0) + e3.transpose(2,0,1) + e3.transpose(2,1,0)
+        e3 *= 2
         
         if isinstance(mf, hf.KohnShamDFT):
             mol = mf.mol
@@ -170,7 +174,7 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
                                         hermi=freq[0]==0) for dm in dm1])
                     kxc = ni.eval_xc_eff(mf.xc, rho0, deriv=3, xctype=xctype)[3]
                     kxc = kxc[0,0,0] * weight
-                    beta -= lib.einsum('xg,yg,zg,g->xyz', rho1, rho1, rho1, kxc)
+                    e3 -= lib.einsum('xg,yg,zg,g->xyz', rho1, rho1, rho1, kxc)
 
             elif xctype in ('GGA', 'MGGA'):
                 for ao, mask, weight, coords \
@@ -180,7 +184,7 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
                     rho1 = numpy.array([ni.eval_rho(mol, ao, dm, mask, xctype,
                                        hermi=freq[0]==0, with_lapl=False) for dm in dm1])
                     kxc = ni.eval_xc_eff(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
-                    beta -= lib.einsum('xig,yjg,zkg,ijkg->xyz', rho1, rho1, rho1, kxc)
+                    e3 -= lib.einsum('xig,yjg,zkg,ijkg->xyz', rho1, rho1, rho1, kxc)
 
             elif xctype == 'HF':
                 pass
@@ -205,12 +209,12 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
         if we == 0: mo1e = (mo1e, mo1e.conj())
         if wi == 0: mo1i = (mo1i, mo1i.conj())
         
-        beta = -lib.einsum('xjl,yli,zji->xyz', f1vve, mo1e[0], mo1i[1])
-        beta -= lib.einsum('yjl,zli,xji->xyz', f1vve, mo1i[0], mo1e[1])
-        beta -= lib.einsum('zjl,xli,yji->xyz', f1vvi, mo1e[0], mo1e[1])
-        beta += lib.einsum('xik,yji,zjk->xyz', f1ooe, mo1e[0], mo1i[1])
-        beta += lib.einsum('yik,zji,xjk->xyz', f1ooe, mo1i[0], mo1e[1])
-        beta += lib.einsum('zik,xji,yjk->xyz', f1ooi, mo1e[0], mo1e[1])
+        e3 = -lib.einsum('xjl,yli,zji->xyz', f1vve, mo1e[0], mo1i[1])
+        e3 -= lib.einsum('yjl,zli,xji->xyz', f1vve, mo1i[0], mo1e[1])
+        e3 -= lib.einsum('zjl,xli,yji->xyz', f1vvi, mo1e[0], mo1e[1])
+        e3 += lib.einsum('xik,yji,zjk->xyz', f1ooe, mo1e[0], mo1i[1])
+        e3 += lib.einsum('yik,zji,xjk->xyz', f1ooe, mo1i[0], mo1e[1])
+        e3 += lib.einsum('zik,xji,yjk->xyz', f1ooi, mo1e[0], mo1e[1])
 
         if we == 0:
             mo1e = mo1e[0]
@@ -220,7 +224,7 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             mo2 = mo2[...,mf.mo_occ==0,:]
             mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
             mo2[0] *= -1
-            beta += lib.einsum('syzji,sxji->xyz', mo2, mo1e[[1,0]]) * we
+            e3 += lib.einsum('syzji,sxji->xyz', mo2, mo1e[[1,0]]) * we
         if wi == 0:
             mo1i = mo1i[0]
         else:
@@ -230,10 +234,10 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             if we == 0: mo2 = numpy.array((mo2, mo2.conj()))
             mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
             mo2[0] *= -1
-            beta += lib.einsum('sxyji,szji->xyz', mo2, mo1i[[1,0]]) * wi * .5
+            e3 += lib.einsum('sxyji,szji->xyz', mo2, mo1i[[1,0]]) * wi * .5
 
-        beta += beta.transpose(1,0,2)
-        beta *= 2
+        e3 += e3.transpose(1,0,2)
+        e3 *= 2
 
         if isinstance(mf, hf.KohnShamDFT):
             mol = mf.mol
@@ -257,7 +261,7 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
                                          hermi=wi==0) for dm in dm1i])
                     kxc = ni.eval_xc_eff(mf.xc, rho0, deriv=3, xctype=xctype)[3]
                     kxc = kxc[0,0,0] * weight
-                    beta -= lib.einsum('xg,yg,zg,g->xyz', rho1e, rho1e, rho1i, kxc)
+                    e3 -= lib.einsum('xg,yg,zg,g->xyz', rho1e, rho1e, rho1i, kxc)
             
             elif xctype in ('GGA', 'MGGA'):
                 for ao, mask, weight, coords \
@@ -269,7 +273,7 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
                     rho1i = numpy.array([ni.eval_rho(mol, ao, dm, mask, xctype,
                                          hermi=wi==0, with_lapl=False) for dm in dm1i])
                     kxc = ni.eval_xc_eff(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
-                    beta -= lib.einsum('xig,yjg,zkg,ijkg->xyz', rho1e, rho1e, rho1i, kxc)
+                    e3 -= lib.einsum('xig,yjg,zkg,ijkg->xyz', rho1e, rho1e, rho1i, kxc)
             
             elif xctype == 'HF':
                 pass
@@ -277,8 +281,8 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             else:
                 raise NotImplementedError(xctype)
 
-        if   freq.index(wi) == 1: beta = beta.transpose(0,2,1)
-        elif freq.index(wi) == 0: beta = beta.transpose(2,1,0)
+        if   freq.index(wi) == 1: e3 = e3.transpose(0,2,1)
+        elif freq.index(wi) == 0: e3 = e3.transpose(2,1,0)
 
     else: # b(w1,w2,w3)
         try: mo10 = pl.mo1[freq[0]]
@@ -301,18 +305,18 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
         if freq[1] == 0: mo11 = (mo11, mo11.conj())
         if freq[2] == 0: mo12 = (mo12, mo12.conj())
         
-        beta = -lib.einsum('xjl,yli,zji->xyz', f1vv0, mo11[0], mo12[1])
-        beta -= lib.einsum('xjl,zli,yji->xyz', f1vv0, mo12[0], mo11[1])
-        beta -= lib.einsum('yjl,xli,zji->xyz', f1vv1, mo10[0], mo12[1])
-        beta -= lib.einsum('yjl,zli,xji->xyz', f1vv1, mo12[0], mo10[1])
-        beta -= lib.einsum('zjl,xli,yji->xyz', f1vv2, mo10[0], mo11[1])
-        beta -= lib.einsum('zjl,yli,xji->xyz', f1vv2, mo11[0], mo10[1])
-        beta += lib.einsum('xik,yji,zjk->xyz', f1oo0, mo11[0], mo12[1])
-        beta += lib.einsum('xik,zji,yjk->xyz', f1oo0, mo12[0], mo11[1])
-        beta += lib.einsum('yik,xji,zjk->xyz', f1oo1, mo10[0], mo12[1])
-        beta += lib.einsum('yik,zji,xjk->xyz', f1oo1, mo12[0], mo10[1])
-        beta += lib.einsum('zik,xji,yjk->xyz', f1oo2, mo10[0], mo11[1])
-        beta += lib.einsum('zik,yji,xjk->xyz', f1oo2, mo11[0], mo10[1])
+        e3 = -lib.einsum('xjl,yli,zji->xyz', f1vv0, mo11[0], mo12[1])
+        e3 -= lib.einsum('xjl,zli,yji->xyz', f1vv0, mo12[0], mo11[1])
+        e3 -= lib.einsum('yjl,xli,zji->xyz', f1vv1, mo10[0], mo12[1])
+        e3 -= lib.einsum('yjl,zli,xji->xyz', f1vv1, mo12[0], mo10[1])
+        e3 -= lib.einsum('zjl,xli,yji->xyz', f1vv2, mo10[0], mo11[1])
+        e3 -= lib.einsum('zjl,yli,xji->xyz', f1vv2, mo11[0], mo10[1])
+        e3 += lib.einsum('xik,yji,zjk->xyz', f1oo0, mo11[0], mo12[1])
+        e3 += lib.einsum('xik,zji,yjk->xyz', f1oo0, mo12[0], mo11[1])
+        e3 += lib.einsum('yik,xji,zjk->xyz', f1oo1, mo10[0], mo12[1])
+        e3 += lib.einsum('yik,zji,xjk->xyz', f1oo1, mo12[0], mo10[1])
+        e3 += lib.einsum('zik,xji,yjk->xyz', f1oo2, mo10[0], mo11[1])
+        e3 += lib.einsum('zik,yji,xjk->xyz', f1oo2, mo11[0], mo10[1])
         
         if freq[0] == 0:
             mo10 = mo10[0]
@@ -322,7 +326,7 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             mo2 = mo2[...,mf.mo_occ==0,:]
             mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
             mo2[0] *= -1
-            beta += lib.einsum('syzji,sxji->xyz', mo2, mo10[[1,0]]) * freq[0]
+            e3 += lib.einsum('syzji,sxji->xyz', mo2, mo10[[1,0]]) * freq[0]
         if freq[1] == 0:
             mo11 = mo11[0]
         else:
@@ -331,7 +335,7 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             mo2 = mo2[...,mf.mo_occ==0,:]
             mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
             mo2[0] *= -1
-            beta += lib.einsum('sxzji,syji->xyz', mo2, mo11[[1,0]]) * freq[1]
+            e3 += lib.einsum('sxzji,syji->xyz', mo2, mo11[[1,0]]) * freq[1]
         if freq[2] == 0:
             mo12 = mo12[0]
         else:
@@ -340,8 +344,8 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             mo2 = mo2[...,mf.mo_occ==0,:]
             mo2 = mo2.reshape(2,3,3,*mo2.shape[-2:])
             mo2[0] *= -1
-            beta += lib.einsum('sxyji,szji->xyz', mo2, mo12[[1,0]]) * freq[2]
-        beta *= 2
+            e3 += lib.einsum('sxyji,szji->xyz', mo2, mo12[[1,0]]) * freq[2]
+        e3 *= 2
         
         if isinstance(mf, hf.KohnShamDFT):
             mol = mf.mol
@@ -368,7 +372,7 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
                                          hermi=freq[2]==0) for dm in dm12])
                     kxc = ni.eval_xc_eff(mf.xc, rho0, deriv=3, xctype=xctype)[3]
                     kxc = kxc[0,0,0] * weight
-                    beta -= lib.einsum('xg,yg,zg,g->xyz', rho10, rho11, rho12, kxc)
+                    e3 -= lib.einsum('xg,yg,zg,g->xyz', rho10, rho11, rho12, kxc)
             
             elif xctype in ('GGA', 'MGGA'):
                 for ao, mask, weight, coords \
@@ -385,7 +389,7 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
                                          hermi=freq[2]==0, with_lapl=False)
                                          for dm in dm12])
                     kxc = ni.eval_xc_eff(mf.xc, rho0, deriv=3, xctype=xctype)[3] * weight
-                    beta -= lib.einsum('xig,yjg,zkg,ijkg->xyz', rho10, rho11, rho12, kxc)
+                    e3 -= lib.einsum('xig,yjg,zkg,ijkg->xyz', rho10, rho11, rho12, kxc)
             
             elif xctype == 'HF':
                 pass
@@ -393,11 +397,20 @@ def hyperpolarizability(pl:'RHFPolar', freq=(0,0,0), **kwargs):
             else:
                 raise NotImplementedError(xctype)
 
-    if mf.verbose >= logger.INFO:
-        log.debug(f'The third energy response tensor b{freq}')
-        log.debug(f'{beta}')
+    e3 = e3.real
+
+    if isinstance(pl, RHFPolar): pm = "hyperpolarizability"
+    else: pm = "paramagnetic hypermagnetizability"
+    log.info(f'The {pm} with frequencies {freq} in A.U.')
+    log.info(f'{e3}')
+    if pl.verbose >= logger.DEBUG:
+        mgn1 = lib.einsum('ijj->i', e3)
+        mgn2 = lib.einsum('jij->i', e3)
+        mgn3 = lib.einsum('jji->i', e3)
+        mgn = lib.norm((mgn1 + mgn2 + mgn3)/3)
+        log.debug(f'The magnitude of the {pm}: {mgn:.6g}')
     
-    return beta
+    return e3
 
 
 class RHFPolar(CPHFBase):
@@ -405,10 +418,7 @@ class RHFPolar(CPHFBase):
         '''The dipole matrix in AO basis.'''
         mf = self.mf
         mol = mf.mol
-        charges = mol.atom_charges()
-        coords  = mol.atom_coords()
-        charge_center = lib.einsum('i,ix->x', charges, coords) / charges.sum()
-        with mol.with_common_orig(charge_center):
+        with mol.with_common_orig((0,0,0)):
             if isinstance(mf, SFX2C1E_SCF) and picture_change:
                 xmol = mf.with_x2c.get_xmol()[0]
                 nao = xmol.nao
@@ -429,8 +439,8 @@ class RHFPolar(CPHFBase):
         return ao_dip
 
     dip_moment = dip_moment
-    polar = polarizability = polarizability
-    hyperpolar = hyperpolarizability = hyperpolarizability
+    pol = polar = polar
+    hyperpol = hyperpolar = hyperpolar
 
 hf.RHF.Polarizability = lib.class_as_method(RHFPolar)
 

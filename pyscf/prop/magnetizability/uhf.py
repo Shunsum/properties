@@ -32,9 +32,9 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.scf import jk
 from pyscf.prop.nmr import uhf as uhf_nmr
+from pyscf.prop.cphf import UCPHFBase
+from pyscf.prop.polarizability.uhf import polar, hyperpolar
 from pyscf.prop.magnetizability import rhf as rhf_mag
-
-warnings.warn('Module magnetizability is under testing')
 
 
 def dia(magobj, gauge_orig=None):
@@ -137,6 +137,15 @@ class Magnetizability(rhf_mag.Magnetizability):
     dia = dia
     para = para
     get_fock = uhf_nmr.get_fock
+
+class UHFMagnet(UCPHFBase, rhf_mag.RHFMagnet):
+    pmag = polar
+    pmag.__doc__ = pmag.__doc__.replace('polarizability',
+                                        'para-magnetizability')
+    
+    hyperpmag = hyperpolar
+    hyperpmag.__doc__ = hyperpmag.__doc__.replace('hyperpolarizability',
+                                                  'para-hypermagnetizability')
 
 
 if __name__ == '__main__':

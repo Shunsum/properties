@@ -8,11 +8,8 @@ from .ghf import GHFPolar
 
 
 def _block_diag(a, b):
-    '''
-    3-D block diagonalizer using SciPy's block_diag.
-    '''
+    '''3-D block diagonalizer using SciPy's block_diag.'''
     assert len(a) == len(b) and a.ndim == b.ndim == 3
-
     return numpy.array([block_diag(a[i], b[i]) for i in range(len(a))], dtype=a.dtype)
 
 
@@ -170,10 +167,7 @@ class DHFPolar(GHFPolar):
     def get_h1(self, **kwargs):
         mf = self.mf
         mol = mf.mol
-        charges = mol.atom_charges()
-        coords  = mol.atom_coords()
-        charge_center = lib.einsum('i,ix->x', charges, coords) / charges.sum()
-        with mol.with_common_orig((charge_center)):
+        with mol.with_common_orig((0,0,0)):
             c = lib.param.LIGHT_SPEED
             ll_dip = mol.intor_symmetric('int1e_r_spinor', comp=3)
             ss_dip = mol.intor_symmetric('int1e_sprsp_spinor', comp=3) * (.5/c)**2

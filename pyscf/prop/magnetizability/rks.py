@@ -164,6 +164,9 @@ class Magnetizability(rhf_mag.Magnetizability):
     get_fock = rks_nmr.get_fock
     solve_mo1 = rks_nmr.solve_mo1
 
+class RKSMagnet(rhf_mag.RHFMagnet):
+    pass
+
 
 if __name__ == '__main__':
     from pyscf import gto

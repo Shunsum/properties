@@ -1,24 +1,44 @@
 #!/usr/bin/env python
 
-from pyscf import lib
+from pyscf import lib, numpy
 from pyscf.x2c import x2c, _response_functions
-from .ghf import GHFPolar
+from .ghf import GHFMagnet
 
 
-class X2CPolar(GHFPolar):
+class X2CMagnet(GHFMagnet):
     def get_h1(self, picture_change=True, **kwargs):
-        '''The dipole matrix in AO basis.'''
+        '''The angular momentum matrix in AO basis.'''
         mf = self.mf
         mol = mf.mol
         with mol.with_common_orig((0,0,0)):
             if picture_change:
-                ao_dip = mf.with_x2c.picture_change(('int1e_r_spinor',
-                                                     'int1e_sprsp_spinor'))
+                xmol = mf.with_x2c.get_xmol()[0]
+                c = 0.5/lib.param.LIGHT_SPEED
+                t1 = xmol.intor_asymmetric('int1e_cg_irxp_spinor') * -.5j
+                t1+= xmol.intor_symmetric('int1e_sigma_spinor') * .5
+                w1 = xmol.intor('int1e_cg_sa10nucsp_spinor') * c**2 * -1j
+                w1+= w1.transpose(0,2,1).conj()
+                w1-= t1
+                ang_mom = mf.with_x2c.picture_change((None, w1), t1)
             else:
-                ao_dip = mol.intor_symmetric('int1e_r_spinor')
-        return ao_dip
+                ang_mom = mol.intor_asymmetric('int1e_cg_irxp_spinor') * -.5j
+                ang_mom+= mol.intor_symmetric('int1e_sigma_spinor') * .5
+        return ang_mom
+    
+    def get_h2(self, picture_change=True, **kwargs):
+        '''The diamagnetic Hamiltonian in AO basis.'''
+        mf = self.mf
+        mol = mf.mol
+        with mol.with_common_orig((0,0,0)):
+            if picture_change:
+                raise NotImplementedError('X2C h2 integrals not implemented')
+            else:
+                n2c = mol.nao_2c()
+                h2 = mol.intor_symmetric('int1e_rr_spinor').reshape(3,3,n2c,n2c)
+                h2 = lib.einsum('xy,zzuv->xyuv', numpy.eye(3), h2) - h2
+        return h2.reshape(9,n2c,n2c)
 
-x2c.SCF.Polarizability = lib.class_as_method(X2CPolar)
+x2c.SCF.Magnetizability = lib.class_as_method(X2CMagnet)
 
 
 if __name__ == '__main__':
@@ -93,7 +113,7 @@ if __name__ == '__main__':
     def apply_E(E):
         mf.get_hcore = lambda *args, **kwargs: get_hcore(mf, mol, E)
         mf.run(conv_tol=1e-14)
-        return mf.dip_moment(mol, mf.make_rdm1(), unit_symbol='AU', verbose=0)
+        return -mf.dip_moment(mol, mf.make_rdm1(), unit_symbol='AU', verbose=0)
     print(polar)
     e1 = apply_E([ 0.0001, 0, 0])
     e2 = apply_E([-0.0001, 0, 0])

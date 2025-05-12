@@ -172,6 +172,9 @@ class Magnetizability(uhf_mag.Magnetizability):
     get_fock = uks_nmr.get_fock
     solve_mo1 = uks_nmr.solve_mo1
 
+class UHFMagnet(uhf_mag.UHFMagnet):
+    pass
+
 
 if __name__ == '__main__':
     from pyscf import gto
